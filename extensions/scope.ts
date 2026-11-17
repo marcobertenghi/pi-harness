@@ -60,8 +60,15 @@ function strings(value: unknown): string[] {
 const ALLOWED_TARGET_EXTENSIONS = new Set([".txt", ".list", ".csv"]);
 const RAW_SCAN_EXTENSIONS = new Set([".nessus", ".nmap", ".gnmap", ".xml"]);
 
-export function loadTargetSources(cwd: string, sources: string[]): { targets: string[]; warnings: string[] } {
+export interface TargetSourceInventory {
+  targets: string[];
+  webEndpoints: string[];
+  warnings: string[];
+}
+
+export function loadTargetSources(cwd: string, sources: string[]): TargetSourceInventory {
   const targets = new Set<string>();
+  const webEndpoints = new Set<string>();
   const warnings: string[] = [];
   for (const source of sources) {
     const path = isAbsolute(source) ? source : resolve(cwd, source);
@@ -69,15 +76,15 @@ export function loadTargetSources(cwd: string, sources: string[]): { targets: st
       warnings.push(`target source not found: ${source}`);
       continue;
     }
-    collectTargetPath(path, targets, warnings);
+    collectTargetPath(path, targets, webEndpoints, warnings);
   }
-  return { targets: [...targets], warnings };
+  return { targets: [...targets], webEndpoints: [...webEndpoints], warnings };
 }
 
-function collectTargetPath(path: string, targets: Set<string>, warnings: string[]): void {
+function collectTargetPath(path: string, targets: Set<string>, webEndpoints: Set<string>, warnings: string[]): void {
   const stat = statSync(path);
   if (stat.isDirectory()) {
-    for (const name of readdirSync(path)) collectTargetPath(join(path, name), targets, warnings);
+    for (const name of readdirSync(path)) collectTargetPath(join(path, name), targets, webEndpoints, warnings);
     return;
   }
   const extension = extname(path).toLowerCase();
@@ -90,10 +97,45 @@ function collectTargetPath(path: string, targets: Set<string>, warnings: string[
     const clean = line.replace(/#.*$/, "").trim();
     if (!clean) continue;
     for (const token of clean.split(/[\s,]+/)) {
-      const normalized = normalizeTarget(token);
+      const hasScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(token);
+      const endpoint = normalizeWebEndpoint(token);
+      if (endpoint) webEndpoints.add(endpoint);
+      else if (hasScheme) {
+        warnings.push(`ignored unsupported or credential-bearing endpoint in ${path}`);
+        continue;
+      }
+      const normalized = normalizeTarget(endpoint || token);
       if (normalized) targets.add(normalized);
     }
   }
+}
+
+export function normalizeWebEndpoint(value: string): string {
+  if (!/^https?:\/\//i.test(value.trim())) return "";
+  try {
+    const endpoint = new URL(value.trim());
+    if (!['http:', 'https:'].includes(endpoint.protocol) || endpoint.username || endpoint.password || !endpoint.hostname) return "";
+    endpoint.hostname = endpoint.hostname.toLowerCase();
+    endpoint.search = "";
+    endpoint.hash = "";
+    return endpoint.toString();
+  } catch {
+    return "";
+  }
+}
+
+export function matchesWebEndpoint(value: string, ruleValue: string): boolean {
+  const valueNormalized = normalizeWebEndpoint(value);
+  const ruleNormalized = normalizeWebEndpoint(ruleValue);
+  if (!valueNormalized || !ruleNormalized) return false;
+  const valueUrl = new URL(valueNormalized);
+  const ruleUrl = new URL(ruleNormalized);
+  if (valueUrl.origin !== ruleUrl.origin) return false;
+  const pattern = ruleUrl.pathname
+    .split("*")
+    .map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"))
+    .join(".*");
+  return new RegExp(`^${pattern}$`).test(valueUrl.pathname);
 }
 
 export function normalizeTarget(value: string): string {

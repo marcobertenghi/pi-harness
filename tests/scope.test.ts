@@ -7,7 +7,9 @@ import {
   authorizationError,
   isActiveNetworkCommand,
   loadTargetSources,
+  matchesWebEndpoint,
   mentionsRawScan,
+  normalizeWebEndpoint,
   obviousTargets,
   scopeDecision,
 } from "../extensions/scope.ts";
@@ -25,11 +27,27 @@ test("scope supports exact hosts, wildcard domains, CIDRs, and exclusions", () =
 test("target sources read text inventory and refuse raw scans", () => {
   const cwd = mkdtempSync(join(tmpdir(), "pi-redteam-"));
   mkdirSync(join(cwd, "targets"));
-  writeFileSync(join(cwd, "targets", "scope.txt"), "# approved\n10.0.0.1\napp.example.test, 10.0.0.0/24\n");
+  writeFileSync(join(cwd, "targets", "scope.txt"), "# approved\n10.0.0.1\napp.example.test, 10.0.0.0/24\nhttps://App.Example.Test/health?full=1#section\nhttps://api.example.test/rest/v1/*\nhttps://user:secret@ignored.example.test/private\n");
   writeFileSync(join(cwd, "targets", "raw.nessus"), "do not read me");
   const result = loadTargetSources(cwd, ["targets"]);
-  assert.deepEqual(result.targets.sort(), ["10.0.0.0/24", "10.0.0.1", "app.example.test"]);
+  assert.deepEqual(result.targets.sort(), ["10.0.0.0/24", "10.0.0.1", "api.example.test", "app.example.test"]);
+  assert.deepEqual(result.webEndpoints.sort(), [
+    "https://api.example.test/rest/v1/*",
+    "https://app.example.test/health",
+  ]);
   assert.match(result.warnings.join("\n"), /refused raw scan file/);
+  assert.match(result.warnings.join("\n"), /credential-bearing endpoint/);
+});
+
+test("web endpoint normalization accepts only credential-free HTTP(S) URLs", () => {
+  assert.equal(normalizeWebEndpoint("https://APP.example.test/a/*#fragment"), "https://app.example.test/a/*");
+  assert.equal(normalizeWebEndpoint("http://app.example.test"), "http://app.example.test/");
+  assert.equal(normalizeWebEndpoint("ftp://app.example.test/file"), "");
+  assert.equal(normalizeWebEndpoint("https://user:secret@app.example.test/private"), "");
+  assert.equal(normalizeWebEndpoint("app.example.test/path"), "");
+  assert.equal(matchesWebEndpoint("https://api.example.test/rest/v1/items/42?token=ignored", "https://api.example.test/rest/v1/*"), true);
+  assert.equal(matchesWebEndpoint("https://other.example.test/rest/v1/items/42", "https://api.example.test/rest/v1/*"), false);
+  assert.equal(matchesWebEndpoint("https://api.example.test/rest/v2/items/42", "https://api.example.test/rest/v1/*"), false);
 });
 
 test("authorization must be named, scoped, dated, and current", () => {

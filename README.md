@@ -94,7 +94,9 @@ app.example.test
 *.lab.example.test
 ```
 
-Use exact IPs, hostnames, IPv4 CIDRs, or wildcard subdomains. Do not put URLs, paths, ports, commands, or credentials in target inventory files.
+Use exact IPs, hostnames, IPv4 CIDRs, wildcard subdomains, or absolute HTTP(S) URLs. Do not put commands or credentials in target inventory files.
+
+For an HTTP(S) URL, the hostname is added to scope and the complete URL path is preserved as a **priority web endpoint**. This matters when a scanner covers only the host or root service. `/rt-status` reports the endpoint count, and `redteam_scope` returns the normalized endpoint list for explicit route-level review. URL query strings and fragments are removed to avoid importing tokens or other sensitive values; credential-bearing or unsupported URLs are rejected. A `*` in a path is a route-family marker, not permission to brute-force or automatically expand paths.
 
 A directory name is only a place to look for inventory—it is not scope by itself. The wizard can save configuration before the directory contains targets, but authorization remains invalid and active checks remain blocked until at least one authorized target is loaded. Inventory is reread automatically; after adding targets, run `/rt-status` without rerunning setup or reloading.
 
@@ -166,7 +168,7 @@ Active-check behavior:
 - without an interactive UI, disarmed active checks are blocked;
 - `/rt-arm` removes per-command prompts only for authorized, in-scope targets;
 - exclusions and unknown targets remain blocked while armed;
-- arming resets on `/reload`, session replacement, restart, or `/rt-disarm`;
+- arming resets on `/reload`, session replacement, restart, `/rt-disarm`, or a detected target/endpoint inventory change;
 - setup never arms checks;
 - direct operator `!`/`!!` shell commands are still scope-gated and audited.
 
@@ -182,7 +184,7 @@ Example schema: [`redteam.config.example.json`](redteam.config.example.json).
 | `authorizationExpires` | Inclusive UTC end date in `YYYY-MM-DD` form. |
 | `targets` | Exact IPs/hosts, IPv4 CIDRs, or wildcard subdomains. |
 | `excludeTargets` | Targets that are always blocked, even if also included. |
-| `targetSources` | Approved `.txt`, `.list`, or `.csv` inventory files/directories. |
+| `targetSources` | Approved `.txt`, `.list`, or `.csv` inventory files/directories. Hostnames define scope; HTTP(S) URLs also become priority web endpoints. |
 | `scanlensDb` | Existing scanlens SQLite database path. |
 | `evidenceDir` | Notes, captured responses, reproducibility records, and reports. |
 | `toolsDir` | Purpose-built scripts, source trees, builds, temporary wordlists, and tool-generated artifacts. |
@@ -223,12 +225,15 @@ The agent follows this sequence:
 1. `redteam_scope` verifies authorization and effective scope.
 2. `scanlens guide` establishes query rules.
 3. `scanlens summary` provides the database-wide overview.
-4. Focused findings, hosts, and service queries build a short ranked queue.
-5. One finding or host is opened at a time.
-6. Scanner claims are independently validated with bounded, non-destructive checks.
-7. False positives, blocked checks, and unresolved coverage are reported explicitly.
+4. Focused findings, hosts, services, and priority web endpoints build a short ranked queue.
+5. One finding, host, or endpoint family is opened at a time.
+6. Scanner claims and configured endpoint paths are independently validated with bounded, non-destructive checks.
+7. Endpoint coverage is tracked as validated, grouped, blocked, or unresolved.
+8. False positives, blocked checks, and unresolved coverage are reported explicitly.
 
 Severity is a lead, not proof. The workflow considers exposure, exploit prerequisites, CISA KEV status, authentication boundaries, compensating controls, contradictory evidence, and attack-path context.
+
+For configured web endpoints, the agent goes deeper but not broader: exact supplied routes first, bounded `HEAD`/`GET` requests, strict timeouts and response limits, low concurrency, and no automatic redirect following. It may inspect authentication challenges, cookies, security headers, CORS, content types, cache behavior, health metadata, or bounded errors. It must not crawl, fuzz, brute-force route families, submit credentials, or call state-changing producer/token/upload/delete operations without a separate documented safe test and operator approval.
 
 If no database exists, import scans outside Pi or update `scanlensDb`. Do not work around a missing database by opening raw scans.
 
@@ -281,6 +286,10 @@ When a check is blocked or sufficient evidence already exists, the agent must st
 ### `scope has no targets`
 
 The configured inventory directory is empty, missing, or contains no supported target files. Add authorized targets to a `.txt`, `.list`, or `.csv` file, then run `/rt-status`. A directory path alone is not scope.
+
+### Endpoints are missing from `redteam_scope`
+
+Use absolute `http://` or `https://` URLs in a supported target inventory file, ensure that file is beneath a configured `targetSources` path, then run `/rt-status` or call `redteam_scope` again. Inventory is reread on every check; no reload is required. Plain hostnames still enter scope but do not create route-level priority entries.
 
 ### `No scanlens database`
 
