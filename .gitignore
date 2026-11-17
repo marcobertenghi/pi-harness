@@ -1,5 +1,23 @@
 node_modules/
 .redteam/
+redteam.config.json
+targets/*
+!targets/.gitkeep
 scanlens.db
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
 *.nessus
 *.nmap
+*.gnmap
+*.xml
+
+# Local credentials and private key material
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx

@@ -5,6 +5,9 @@
   "description": "A scope-aware red-team workflow for Pi and scanlens",
   "keywords": ["pi-package", "red-team", "scanlens"],
   "type": "module",
+  "engines": {
+    "node": ">=22.19.0"
+  },
   "scripts": {
     "test": "node --import tsx --test tests/*.test.ts",
     "check": "tsc --noEmit"

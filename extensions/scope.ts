@@ -11,6 +11,7 @@ export interface RedteamConfig {
   scanlensDb: string;
   evidenceDir: string;
   toolsDir: string;
+  auditDb: string;
 }
 
 export const DEFAULT_CONFIG: RedteamConfig = {
@@ -22,6 +23,7 @@ export const DEFAULT_CONFIG: RedteamConfig = {
   scanlensDb: "scanlens.db",
   evidenceDir: ".redteam/evidence",
   toolsDir: ".redteam/tools",
+  auditDb: ".redteam/audit/audit.db",
 };
 
 export function loadConfig(cwd: string): { config: RedteamConfig; path: string; error?: string } {
@@ -29,6 +31,13 @@ export function loadConfig(cwd: string): { config: RedteamConfig; path: string; 
   if (!existsSync(path)) return { config: { ...DEFAULT_CONFIG }, path, error: "redteam.config.json is missing" };
   try {
     const value = JSON.parse(readFileSync(path, "utf8")) as Partial<RedteamConfig>;
+    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("expected a configuration object");
+    for (const key of ["engagement", "authorizationExpires", "scanlensDb", "evidenceDir", "toolsDir", "auditDb"] as const) {
+      if (value[key] !== undefined && (typeof value[key] !== "string" || !value[key]!.trim())) throw new Error(`${key} must be a non-empty string`);
+    }
+    for (const key of ["targets", "excludeTargets", "targetSources"] as const) {
+      if (value[key] !== undefined && (!Array.isArray(value[key]) || !value[key]!.every((item) => typeof item === "string"))) throw new Error(`${key} must be an array of strings`);
+    }
     return {
       path,
       config: {
@@ -49,7 +58,7 @@ function strings(value: unknown): string[] {
 }
 
 const ALLOWED_TARGET_EXTENSIONS = new Set([".txt", ".list", ".csv"]);
-const RAW_SCAN_EXTENSIONS = new Set([".nessus", ".nmap", ".xml"]);
+const RAW_SCAN_EXTENSIONS = new Set([".nessus", ".nmap", ".gnmap", ".xml"]);
 
 export function loadTargetSources(cwd: string, sources: string[]): { targets: string[]; warnings: string[] } {
   const targets = new Set<string>();
@@ -132,18 +141,25 @@ export function scopeDecision(target: string, includes: string[], excludes: stri
   return includes.some((rule) => matchesScope(target, rule)) ? "included" : "unknown";
 }
 
+export function isExampleConfig(config: RedteamConfig): boolean {
+  return config.engagement.trim() === "Example authorized assessment"
+    || config.targets.some((target) =>
+      ["app.example.test", "*.lab.example.test"].includes(target.trim().toLowerCase()));
+}
+
 export function authorizationError(config: RedteamConfig, targetCount: number, now = new Date()): string | undefined {
+  if (isExampleConfig(config)) return "configuration contains example values; run /rt-setup";
   if (!config.engagement.trim()) return "engagement name is missing";
   if (targetCount === 0) return "scope has no targets";
   if (!/^\d{4}-\d{2}-\d{2}$/.test(config.authorizationExpires)) return "authorizationExpires must be YYYY-MM-DD";
   const end = new Date(`${config.authorizationExpires}T23:59:59Z`);
-  if (Number.isNaN(end.valueOf())) return "authorizationExpires is invalid";
+  if (Number.isNaN(end.valueOf()) || end.toISOString().slice(0, 10) !== config.authorizationExpires) return "authorizationExpires is invalid";
   if (now.valueOf() > end.valueOf()) return `authorization expired on ${config.authorizationExpires}`;
   return undefined;
 }
 
 export function mentionsRawScan(command: string): boolean {
-  return /(?:^|[\s'"`])[^\s'"`]*\.(?:nessus|nmap|xml)(?:[\s'"`]|$)/i.test(command);
+  return /(?:^|[\s'"`])[^\s'"`]*\.(?:nessus|nmap|gnmap|xml)(?:[\s'"`]|$)/i.test(command);
 }
 
 export function isActiveNetworkCommand(command: string): boolean {

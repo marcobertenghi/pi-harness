@@ -37,7 +37,7 @@ test("authorization must be named, scoped, dated, and current", () => {
     engagement: "Lab",
     authorizationExpires: "2030-01-01",
     targets: [], excludeTargets: [], targetSources: [], scanlensDb: "scanlens.db",
-    evidenceDir: ".redteam/evidence", toolsDir: ".redteam/tools",
+    evidenceDir: ".redteam/evidence", toolsDir: ".redteam/tools", auditDb: ".redteam/audit/audit.db",
   };
   assert.equal(authorizationError(base, 1, new Date("2029-01-01T00:00:00Z")), undefined);
   assert.match(authorizationError(base, 0, new Date("2029-01-01T00:00:00Z"))!, /no targets/);
@@ -49,6 +49,7 @@ test("guards recognize active tools and raw scan references", () => {
   assert.equal(isActiveNetworkCommand("sudo nmap -sV 10.0.0.1"), true);
   assert.equal(isActiveNetworkCommand("printf hello"), false);
   assert.equal(mentionsRawScan("cat scans/client.nessus"), true);
+  assert.equal(mentionsRawScan("less scans/client.gnmap"), true);
   assert.equal(mentionsRawScan("scanlens summary --db scanlens.db"), false);
   assert.deepEqual(obviousTargets("nmap app.example.test"), ["app.example.test"]);
   assert.deepEqual(obviousTargets("ffuf -w /usr/share/wordlists/common.txt -u https://app.example.test/FUZZ"), ["app.example.test"]);
