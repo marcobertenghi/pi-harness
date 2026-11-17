@@ -1,0 +1,18 @@
+{
+  "engagement": "Example authorized assessment",
+  "authorizationExpires": "2027-01-31",
+  "targets": [
+    "10.20.0.0/24",
+    "app.example.test",
+    "*.lab.example.test"
+  ],
+  "excludeTargets": [
+    "10.20.0.1"
+  ],
+  "targetSources": [
+    "targets"
+  ],
+  "scanlensDb": "scanlens.db",
+  "evidenceDir": ".redteam/evidence",
+  "toolsDir": ".redteam/tools"
+}
