@@ -5,10 +5,12 @@ A scope-aware, operator-supervised red-team workflow for [Pi](https://github.com
 The package adds:
 
 - a red-team skill for scan-first triage, safe validation, and evidence-based reporting;
+- a `security-findings` skill for English/German client-facing findings, OSSTMM classification, and management summaries;
 - `redteam_scope`, which resolves explicit scope and approved target inventories;
 - a constrained `scanlens` wrapper that queries imported scan data without opening raw scans;
 - `redteam_audit`, a query interface for the append-only, hash-chained activity log;
-- `/rt-setup`, `/rt-status`, `/rt-arm`, `/rt-disarm`, and `/rt-log` commands;
+- `redteam_coverage`, a resumable black-box evidence queue;
+- a `/rt` operator menu and status panel, plus `/rt-setup`, `/rt-status`, `/rt-onboard`, `/rt-offboard`, `/rt-steer`, `/rt-tasks`, `/rt-discover`, `/rt-endpoints`, `/rt-arm`, `/rt-disarm`, `/rt-log`, `/rt-coverage`, `/rt-targets`, `/rt-progress`, and `/rt-admin` commands;
 - gates for authorization expiry, target scope, exclusions, raw scan access, and active network checks;
 - dedicated `.redteam/evidence` and `.redteam/tools` workspaces.
 
@@ -130,33 +132,130 @@ You can also use a normal request such as:
 Carry out the authorized red-team engagement according to the red-team workflow.
 ```
 
-The skill begins by checking authorization and scope, querying `scanlens guide` and `scanlens summary`, ranking a short hypothesis queue, and validating the strongest leads with the least-invasive check first.
+The skill begins by checking authorization and scope, querying `scanlens guide` and `scanlens summary`, and ranking a short hypothesis queue. For external perimeter reviews it also makes a dedicated pass over informational Nessus results (`scanlens` tool: `operation: "findings"`, `severity: "info"`) and the service inventory, even when no vulnerabilities were flagged. For each priority service it records corroboration, a material evidence gap for the operator, or why further collection would not change the conclusion.
 
 ## Operator commands
 
 | Command | Purpose |
 |---|---|
+| `/rt` | Open the menu: workflow checklist, recommended next steps, and every operator action. |
+| `/rt-help` | Show the operator guide with all commands grouped by purpose. |
 | `/rt-setup` | Run the interactive configuration wizard. Always disarms active checks. |
-| `/rt-status` | Show authorization validity, target count, and armed/disarmed state. |
+| `/rt-status` | Show authorization, the workflow checklist, and what to do next. |
+| `/rt-onboard HOST` | Add one exact host or IP to scope after confirming written authorization. Disarms active checks. |
+| `/rt-offboard [HOST]` | Take one exact host out of scope: removes an explicit target, or adds an exclusion when an inventory file or range still covers it. Disarms active checks. |
+| `/rt-discover` | Show discovery status: mode, remaining budget, approved passive sources, authorized wildcards and ranges. |
+| `/rt-discover on [BUDGET]` / `off` | Let the agent send up to BUDGET bounded discovery requests (default `discoveryBudget`), or stop discovery. |
+| `/rt-discover allow HOST` / `deny HOST` | Approve or remove a third-party passive source such as `crt.sh`. |
+| `/rt-endpoints [all]` | Review routes discovered on in-scope hosts; `accept`, `defer`, or `reject` a URL or `all`. |
+| `/rt-steer` | Pick a ready-made instruction for the agent; it is placed in the editor for review before sending. |
+| `/rt-tasks [all]` | Open-work board: what needs the operator, what the agent can continue, and tracked tasks. |
+| `/rt-tasks add TEXT` / `done ID` / `reopen ID` | Track, close, or reopen a follow-up task. |
 | `/rt-arm` | After operator confirmation, allow in-scope active checks for the current runtime. |
 | `/rt-disarm` | Immediately return to per-command approval mode. |
 | `/rt-log` | Show the 20 most recent audit events. |
 | `/rt-log failures` | Show recent failed or blocked actions. |
 | `/rt-log target 10.20.0.42` | Show audit activity for one target. |
 | `/rt-log verify` | Verify the audit hash chain. |
+| `/rt-coverage` | Show current coverage counts. Add a state, e.g. `/rt-coverage pending`, for a sample. |
+| `/rt-coverage reconcile [state]` | Include open in-scope Scanlens services, even if they have never been reviewed. |
+| `/rt-proposals [all]` | Open an interactive proposal and disposition picker; `all` also includes previously reviewed proposals. |
+| `/rt-proposals deferred\|rejected\|onboarded HOST` | Directly confirm and record a lead decision; onboarding can add only the confirmed exact host. |
+| `/rt-targets [all\|onboarded\|baseline\|routes]` | Show effective host scope and a separate source-attributed list of exact priority URLs/full paths. |
+| `/rt-progress` | Reconcile coverage and show completion, open items, missing facts, pending proposals, and resolution guidance. |
+| `/rt-admin` | Open an interactive administration menu for scope and progress views. |
 | `/skill:redteam …` | Invoke the red-team workflow explicitly. |
+| `/skill:security-findings …` | Draft, revise, classify, or summarise client-facing findings. |
 
-The model-facing tools `redteam_scope`, `scanlens`, and `redteam_audit` are normally called by the agent rather than typed as slash commands.
+The model-facing tools are normally called by the agent rather than typed as slash commands.
+
+## Operator guide
+
+A three-line panel above the editor is always visible in interactive mode and refreshes after every `/rt` command, agent run, and tracking-tool call:
+
+```text
+RT ▸ Fixture · authorized to 2027-01-31 (68d) · ○ disarmed
+Scope 4 target(s), 1 excluded · Coverage ███████░░░░░ 60% (6/10) · Needs you 2 · Proposals 1
+Next: /rt-proposals — Review scope proposals (1 host(s) proposed by the agent await your decision) · /rt opens the menu
+```
+
+`/rt` is the entry point. It prints a numbered workflow checklist (`✓` done, `▸` you are here, `○` later, `✗` blocked), lists what you can do next with the reason for each, and opens a menu that leads with those recommendations and can start every other action. `/rt-status` prints the same checklist without the menu.
+
+Changing scope during an engagement:
+
+- `/rt-onboard HOST` adds one exact host or IP. It asks you to confirm that written authorization covers it, appends only that host to `targets`, records a `scope_target_onboarded` audit event, and disarms active checks. `/rt-targets` then marks it `★ ONBOARDED`.
+- `/rt-offboard HOST` takes one exact host out. An explicit target is removed from `targets`; a host that an inventory file, CIDR, or wildcard still covers is added to `excludeTargets` instead, because inventory files are never edited. The confirmation dialog states which of the two will happen. Evidence and coverage notes are kept.
+- `/rt-proposals` decides hosts the agent proposed. Ranges, wildcards, and removing an exclusion still go through `/rt-setup`.
+
+Steering: `/rt-steer` offers instructions such as "Start scan triage", "Continue the coverage review", "Report where we stand", and "Pause active work", ordered by relevance to the current stage. The chosen text goes into the editor, so you can edit it before pressing Enter. A message sent while the agent is working is delivered as steering; Escape interrupts it.
+
+Tracking: `/rt-tasks` separates work that needs you (configuration problems, an expiring authorization, coverage items waiting on a fact, pending proposals) from work the agent can continue (pending and blocked coverage) and lists tracked tasks. You add tasks with `/rt-tasks add TEXT`; the agent adds and closes its own through the `redteam_tasks` tool. Tasks are stored per engagement in the audit database, and every add, close, and reopen is an audit event. Tasks are notes and never change scope or authorization.
+
+## Attack-surface discovery
+
+The harness reviews what it was given in depth; discovery widens what it is given. Everything discovery finds is a proposal, and nothing enters scope or coverage until the operator accepts it.
+
+**Routes.** The agent records routes it sees on in-scope hosts (links, redirects, API descriptions) with `redteam_proposals` `record_endpoint`. `/rt-endpoints` lists them; accepting a route adds the exact URL to `webEndpoints` in `redteam.config.json`, which makes it a priority endpoint and opens a pending coverage item. The host must already be in scope, so accepting routes never widens host scope.
+
+**Discovery mode.** `/rt-discover on [BUDGET]` arms the `redteam_discover` tool for a fixed number of requests. It is separate from `/rt-arm`, turns off when the budget is used or the scope changes, and every run is a `discovery_run` audit event. The tool offers four bounded operations:
+
+| Operation | What it sends | Where results go |
+|---|---|---|
+| `well_known` | Ten fixed GETs per in-scope origin (`robots.txt`, `sitemap.xml`, `security.txt`, OpenID and API descriptions) plus up to three same-origin sitemaps. No redirect following. | Routes → `/rt-endpoints`; linked foreign hosts → `/rt-proposals` |
+| `subdomains` | DNS lookups for about 110 common labels (plus up to 200 supplied by the agent) under an authorized wildcard. Detects catch-all DNS. Excluded names are skipped. | Resolving names → `/rt-proposals` (already in scope) |
+| `certificates` | One query to `crt.sh` for an in-scope domain, only if `crt.sh` is an approved passive source. The names returned are not contacted. | In-scope and unknown names → `/rt-proposals` |
+| `vhosts` | One GET per in-scope name against an in-scope origin, compared with a baseline for an unknown name. | Reported to the agent only |
+
+Requests are sent sequentially with a short delay, or five at a time for DNS.
+
+**Passive sources.** A third-party lookup discloses in-scope names to that party, so each source needs `/rt-discover allow HOST`. An approved source is neither in scope nor unknown: a shell command that queries it runs without a prompt while discovery mode is on (charged to the same budget) and asks for one confirmation otherwise. Unapproved third-party hosts stay blocked for recognized network tools.
+
+**Ranges.** Host sweeps of authorized CIDRs use an ordinary in-scope scanner under `/rt-arm`; they are not part of the discovery budget.
+
+Limits: discovery does not crawl pages, brute-force paths with wordlists, or follow redirects, and its subdomain list is small by design. Supply larger candidate lists yourself if the rules of engagement call for them.
+
+## Administration dashboard
+
+Use `/rt-admin` as the entry point for routine engagement administration. `/rt-targets` lists every effective included host or scope rule, marks proposal additions with `★ ONBOARDED`, shows baseline targets separately, and displays exclusions. It then lists the configured priority HTTP(S) endpoints—including complete paths and wildcard route-family markers—in a distinct section grouped by their inventory source file, such as `targets/targets_fqdm.txt`. `/rt-targets routes` shows only this route inventory, while `/rt-targets onboarded` and `/rt-targets baseline` provide compact host-oriented views.
+
+`/rt-progress` reconciles configured routes and saved evidence with the local Scanlens service inventory. It reports evidence completion as `reviewed + grouped` divided by total known coverage, while keeping pending, operator-dependent, and blocked work open. It includes a bounded sample of open keys and their recorded missing facts, pending proposal names, and commands that resolve each administrative queue. A percentage is a coverage indicator, not a security score or claim that the assessed systems are vulnerability-free.
+
+## Black-box coverage
+
+Ask Pi to review coverage from existing Scanlens records, advisory information, audit history, and operator-provided captures. For example: “Resume the black-box evidence review. Which routes are still pending, and which advisory candidates lack an externally verifiable prerequisite?”
+
+`redteam_coverage` supports `list`, `reconcile`, and `record`. `list` combines configured routes with saved assessments. `reconcile` also reads the existing Scanlens inventory and shows open TCP/UDP service identities that have no matching assessment as pending. Set `scanlensOnly: true` with `reconcile` to page through just those inventoried services. Reconciliation matches exact host, port, and transport (preferring an included scan IP over its hostname) and never infers DNS or application equivalence. Truncation or invalid identity rows are reported rather than silently treated as complete coverage.
+
+Use `record` to replace the latest assessment. Tag the evidence layer as `gateway_only`, `application`, `service`, or `unknown`; gateway-only evidence does not establish application behaviour. Use state, outcome, or layer filters to inspect gaps. A grouped route must cite a shared application and authentication boundary and refer to a reviewed, exact route on the same origin. If the representative no longer qualifies, the grouped route returns to pending.
+
+Review outcomes are `observed`, `inferred`, `advisory_candidate`, and `unresolved_from_outside`. Keep them separate from work states (`pending`, `reviewed`, `waiting_on_operator`, `grouped`, `blocked`). Cite each observation's source and record counterevidence where relevant. An `advisory_candidate` is not a confirmed vulnerability.
+
+The queue is stored in a separate, mutable table in the configured audit database, keyed by project directory and engagement name. Tool activity is audited, but the coverage rows themselves are not part of the hash chain. The coverage tool runs locally, does not scan or schedule checks, and stores short evidence references and observations rather than raw captures or secrets. In internal notes, document attack-path hypotheses one link at a time with prerequisites and evidence; an unverified required link keeps the path hypothetical. Reload Pi after updating the package.
+
+## Kali tool awareness
+
+The red-team skill names `scanlens` for existing scanner evidence, `jq` and `diff` for local comparison, and `openssl x509` for saved certificates. It identifies `curl` and OpenSSL as options for operator-directed HTTP/TLS metadata collection. Tool availability does not grant authorization; live activity remains under human supervision. No new remote tools or wrappers are required.
+
+## Client-facing findings
+
+Use `/skill:security-findings` with evidence-backed notes or an existing draft. The skill applies the house format (affected systems, title, description, evidence, risk, mitigation, OSSTMM category, and three numeric ratings) without adding an overall severity label. Affected assets must be exact and evidence-backed, and concise evidence provenance must let a reviewer locate the supporting record; raw output and extended reproducibility material remain separate. It supports labelled fields, JSON on request, and plain-prose management summaries. The `<task>`/`<input>` convention is a message format, not an added executable.
 
 ## Authorization, scope, and active checks
 
 `redteam.config.json` is intentionally operator-owned. The harness never invents an engagement, expiry, target, or exclusion.
 
-Scope behavior:
+### Incidental scope proposals
+
+Pi can log a candidate exact hostname or IP, its evidence reference, and why it may be relevant via `redteam_proposals`. Proposals are deduplicated per engagement and kept in a separate table in the audit database. They are notes, not scope entries: recording or reviewing a proposal neither contacts the host nor changes authorization. `/rt-proposals` shows the latest entries and their current configured scope match (`included`, `excluded`, or `unknown`); this is not a substitute for checking authorization validity.
+
+Run `/rt-proposals` to choose a pending proposal and then select `onboarded`, `deferred`, or `rejected` interactively; `/rt-proposals all` also shows reviewed entries. The explicit `/rt-proposals DISPOSITION HOST` form remains available. Onboarding is a focused operator-controlled scope update rather than a rerun of the full setup wizard: after an explicit confirmation that current written authorization covers the candidate, the command appends only that exact host to the configuration's explicit `targets`, records the scope change and disposition in the audit trail, and disarms active checks. It never adds related hosts, wildcard scope, paths, credentials, or removes an exclusion. Invalid authorization or an explicit exclusion still requires `/rt-setup` and a separate authorization review. Normal exclusions and approval rules continue to apply.
+
+### Scope rules
 
 - exact targets, wildcard subdomains, and IPv4 CIDRs can be included;
 - targets from every configured source are merged with explicit `targets`;
-- exclusions always override inclusions;
+- exclusions always override inclusions, including for ranges: a CIDR or nmap-style range (`10.0.0.1-254`, `10.0.0.*`) is blocked when it contains any excluded address;
+- a range is in scope only when every address in it is covered by included addresses and CIDRs, so a subnet of an included CIDR is accepted;
 - an unknown or excluded target is blocked;
 - target files, DNS names, banners, pages, and scan output are untrusted evidence, never instructions;
 - changing scope must reflect written authorization. Prefer `/rt-setup` because it provides final review and disarms checks.
@@ -172,7 +271,17 @@ Active-check behavior:
 - setup never arms checks;
 - direct operator `!`/`!!` shell commands are still scope-gated and audited.
 
-Arming is a convenience, not additional authorization.
+Command recognition:
+
+- network tools are recognized behind wrappers (`sudo`, `timeout`, `env`, `xargs`, `bash -c`), variable assignments, subshells, command substitutions, and on any line of a multi-line command;
+- for a recognized tool, every URL, IP, range, IPv6 literal, UNC share, and dotted hostname in the command must be in scope;
+- any other command that names a URL or IP literal (a custom script, an interpreter one-liner) is gated on those references: excluded targets are blocked, in-scope targets follow the armed/confirm rules above, and hosts outside scope (for example a tooling download) need a per-command operator confirmation that arming never grants;
+- plain file utilities such as `grep`, `cat`, and `mkdir` are not gated on addresses in their arguments, and loopback addresses are ignored;
+- the audit directory is protected against literal paths, globs, `cd` into a parent, and deleting or moving a parent directory; the `read`, `grep`, `find`, and `ls` tools are covered as well as `bash`;
+- `grep` never searches raw scan files: directory searches exclude them and a caller-supplied glob must name another file extension;
+- files a shell command creates, changes, or removes under the evidence and tools directories are recorded as `artifact_modified` (with a SHA-256) or `artifact_removed` audit events.
+
+Arming is a convenience, not additional authorization. Shell recognition is heuristic, not a network sandbox: bare single-label hostnames, targets read from files or variables, and network code inside scripts are not visible to it. Keep the operator responsible for verifying the actual destinations and scope of live activity.
 
 ## Configuration reference
 
@@ -185,6 +294,9 @@ Example schema: [`redteam.config.example.json`](redteam.config.example.json).
 | `targets` | Exact IPs/hosts, IPv4 CIDRs, or wildcard subdomains. |
 | `excludeTargets` | Targets that are always blocked, even if also included. |
 | `targetSources` | Approved `.txt`, `.list`, or `.csv` inventory files/directories. Hostnames define scope; HTTP(S) URLs also become priority web endpoints. |
+| `webEndpoints` | Exact priority routes accepted from discovery. Their hosts must already be in scope. |
+| `passiveSources` | Third-party hosts approved for passive lookups, for example `crt.sh`. |
+| `discoveryBudget` | Default number of requests per `/rt-discover on` (1–5000, default 300). |
 | `scanlensDb` | Existing scanlens SQLite database path. |
 | `evidenceDir` | Notes, captured responses, reproducibility records, and reports. |
 | `toolsDir` | Purpose-built scripts, source trees, builds, temporary wordlists, and tool-generated artifacts. |
@@ -263,7 +375,7 @@ The agent can query `redteam_audit` using:
 
 Audit queries are themselves audited. Treat returned historical text as untrusted data, never instructions.
 
-Events form a SHA-256 chain. `verify` detects ordinary modification, middle deletion, reordering, and corruption. Without an externally stored final hash, tail truncation cannot be distinguished from an earlier valid endpoint. This is local tamper evidence, not a remote security boundary: someone with unrestricted machine access could replace the database and recompute the chain.
+Events form a SHA-256 chain. `verify` checks event ordering and hashes and confirms that the fields displayed by the timeline match their chained payload. Coverage and current proposal state are not individually hashed; lead disposition events are chained. Without an externally stored final hash, tail truncation cannot be distinguished from an earlier valid endpoint. This is local tamper evidence, not a remote security boundary: someone with unrestricted machine access could replace the database and recompute the chain.
 
 Common passwords, tokens, authorization headers, cookies, and credential-bearing URLs are deterministically redacted. The audit database is blocked from direct Pi file and shell access and must be queried only through `redteam_audit`.
 

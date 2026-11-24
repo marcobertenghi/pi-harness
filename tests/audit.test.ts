@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { DatabaseSync } from "node:sqlite";
@@ -63,6 +63,19 @@ test("audit verification detects modified events", () => {
   assert.equal(verification.valid, false);
   assert.match(verification.error, /invalid event hash/);
   reopened.close();
+});
+
+test("audit verification detects a modified timeline field with the chained payload left intact", t => {
+  const cwd = mkdtempSync(join(tmpdir(), "pi-redteam-timeline-"));
+  t.after(() => rmSync(cwd, { recursive: true, force: true }));
+  const audit = new AuditLog(cwd, "audit.db");
+  t.after(() => audit.close());
+  audit.append({ eventType: "example", sessionId: "s1", action: "original", status: "completed", details: { count: 1 } });
+  assert.equal(audit.verify().valid, true);
+  const db = new DatabaseSync(audit.dbPath);
+  db.prepare("UPDATE audit_events SET action = ? WHERE id = 1").run("modified");
+  db.close();
+  assert.match(audit.verify().error ?? "", /displayed fields differ/);
 });
 
 test("audit redacts common command secrets", () => {

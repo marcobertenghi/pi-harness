@@ -15,5 +15,8 @@
   "scanlensDb": "scanlens.db",
   "evidenceDir": ".redteam/evidence",
   "toolsDir": ".redteam/tools",
-  "auditDb": ".redteam/audit/audit.db"
+  "auditDb": ".redteam/audit/audit.db",
+  "webEndpoints": [],
+  "passiveSources": [],
+  "discoveryBudget": 300
 }

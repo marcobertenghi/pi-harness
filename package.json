@@ -14,7 +14,7 @@
   },
   "pi": {
     "extensions": ["./extensions/redteam.ts"],
-    "skills": ["./skills/redteam"]
+    "skills": ["./skills/redteam", "./skills/security-findings"]
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",

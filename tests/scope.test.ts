@@ -5,7 +5,6 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import {
   authorizationError,
-  isActiveNetworkCommand,
   loadTargetSources,
   matchesWebEndpoint,
   mentionsRawScan,
@@ -13,6 +12,7 @@ import {
   obviousTargets,
   scopeDecision,
 } from "../extensions/scope.ts";
+import { isActiveNetworkCommand } from "../extensions/shell.ts";
 
 test("scope supports exact hosts, wildcard domains, CIDRs, and exclusions", () => {
   const includes = ["10.20.0.0/24", "app.example.test", "*.lab.example.test"];
@@ -35,6 +35,9 @@ test("target sources read text inventory and refuse raw scans", () => {
     "https://api.example.test/rest/v1/*",
     "https://app.example.test/health",
   ]);
+  assert.equal(result.sourceDetails.length, 1);
+  assert.equal(result.sourceDetails[0].source, "targets/scope.txt");
+  assert.deepEqual(result.sourceDetails[0].webEndpoints.sort(), result.webEndpoints.sort());
   assert.match(result.warnings.join("\n"), /refused raw scan file/);
   assert.match(result.warnings.join("\n"), /credential-bearing endpoint/);
 });
@@ -56,6 +59,7 @@ test("authorization must be named, scoped, dated, and current", () => {
     authorizationExpires: "2030-01-01",
     targets: [], excludeTargets: [], targetSources: [], scanlensDb: "scanlens.db",
     evidenceDir: ".redteam/evidence", toolsDir: ".redteam/tools", auditDb: ".redteam/audit/audit.db",
+    webEndpoints: [], passiveSources: [], discoveryBudget: 300,
   };
   assert.equal(authorizationError(base, 1, new Date("2029-01-01T00:00:00Z")), undefined);
   assert.match(authorizationError(base, 0, new Date("2029-01-01T00:00:00Z"))!, /no targets/);

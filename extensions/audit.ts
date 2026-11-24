@@ -2,6 +2,9 @@ import { createHash } from "node:crypto";
 import { createReadStream, existsSync, mkdirSync, statSync } from "node:fs";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
+import { CoverageStore } from "./coverage.ts";
+import { EndpointProposalStore, ProposalStore, type Disposition } from "./proposals.ts";
+import { TaskStore } from "./tasks.ts";
 
 export interface AuditEvent {
   timestampUtc?: string;
@@ -40,11 +43,24 @@ export interface AuditQuery {
   limit?: number;
 }
 
+const CREDENTIAL_TOOLS = "nxc|netexec|crackmapexec|cme|hydra|medusa|sshpass|evil-winrm|smbmap|kerbrute|certipy|ldapdomaindump|bloodhound-python|mysql|mysqldump|impacket-[\\w-]+|[\\w-]+\\.py";
+const SECRET_VALUE = "(?:'[^']*'|\"[^\"]*\"|[^\\s'\"`]+)";
+
 const SECRET_PATTERNS: Array<[RegExp, string]> = [
-  [/(authorization\s*:\s*(?:bearer|basic)\s+)[^\s'"`]+/gi, "$1[REDACTED]"],
-  [/((?:api[_-]?key|token|secret|password|passwd|pwd)\s*[=:]\s*)[^\s'"`]+/gi, "$1[REDACTED]"],
-  [/(--(?:password|passwd|token|api-key|secret)(?:=|\s+))[^\s'"`]+/gi, "$1[REDACTED]"],
+  // Authorization header with any scheme (Bearer, Basic, Token, ...) or none.
+  [/(authorization["']?\s*[:=]\s*["']?(?:[a-z-]+\s+)?)[^\s'"`]+/gi, "$1[REDACTED]"],
+  // KEY=value, KEY: value and "key": "value" where the name mentions a secret.
+  [/([\w-]*(?:api[_-]?key|token|secret|password|passwd|pwd|credential)[\w-]*["']?\s*[=:]\s*["']?)[^\s'"`,}]+/gi, "$1[REDACTED]"],
+  [new RegExp(`(--(?:password|passwd|pass|token|api-?key|secret|hash|hashes)(?:=|\\s+))${SECRET_VALUE}`, "gi"), "$1[REDACTED]"],
+  [new RegExp(`(\\s-hashes\\s+)${SECRET_VALUE}`, "gi"), "$1[REDACTED]"],
+  // user:password pairs: curl -u, proxy users, and user:password@host.
+  [/(\s(?:-u|--user|--proxy-user)(?:\s+|=)["']?[^\s:'"]+:)[^\s'"]+/g, "$1[REDACTED]"],
+  [/(\s-U\s+["']?[^\s%'"]+%)[^\s'"]+/g, "$1[REDACTED]"],
+  [/(\s\/p:)[^\s'"]+/g, "$1[REDACTED]"],
   [/([a-z][a-z0-9+.-]*:\/\/[^\s/:]+:)[^@\s/]+@/gi, "$1[REDACTED]@"],
+  [/(\b[\w.-]+\/[\w.$-]+:)[^@\s'"]+(@[\w.-]+)/g, "$1[REDACTED]$2"],
+  // -p / -H values, only on command lines of tools where they carry a password or hash.
+  [new RegExp(`(\\b(?:${CREDENTIAL_TOOLS})\\b[^\\n;|&]*?\\s-[pH](?:\\s+|=)?)${SECRET_VALUE}`, "g"), "$1[REDACTED]"],
   [/((?:cookie|set-cookie)\s*:\s*)[^\r\n]+/gi, "$1[REDACTED]"],
 ];
 
@@ -84,9 +100,8 @@ function parseDetails(value: unknown): unknown {
   try { return JSON.parse(String(value)); } catch { return { parseError: true, excerpt: bounded(String(value), 1024) }; }
 }
 
-function rowObject(row: Record<string, unknown>) {
+function eventFields(row: Record<string, unknown>) {
   return {
-    id: Number(row.id),
     timestampUtc: row.timestamp_utc,
     eventType: row.event_type,
     sessionId: row.session_id,
@@ -98,17 +113,46 @@ function rowObject(row: Record<string, unknown>) {
     status: row.status,
     durationMs: row.duration_ms,
     summary: row.summary,
-    details: parseDetails(row.details_json),
+    detailsJson: row.details_json,
     contentHash: row.content_hash,
     evidencePath: row.evidence_path,
     scopeHash: row.scope_hash,
-    eventHash: row.event_hash,
   };
+}
+
+function rowObject(row: Record<string, unknown>) {
+  const { detailsJson, ...fields } = eventFields(row);
+  return { id: Number(row.id), ...fields, details: parseDetails(detailsJson), eventHash: row.event_hash };
 }
 
 export class AuditLog {
   readonly dbPath: string;
   private readonly db: DatabaseSync;
+  private coverageStore?: CoverageStore;
+  private proposalStore?: ProposalStore;
+  private taskStore?: TaskStore;
+
+  private endpointProposalStore?: EndpointProposalStore;
+
+  get endpointProposals(): EndpointProposalStore {
+    return this.endpointProposalStore ??= new EndpointProposalStore(this.db);
+  }
+
+  countEvents(eventType: string): number {
+    return Number((this.db.prepare("SELECT count(*) AS n FROM audit_events WHERE event_type = ?").get(eventType) as { n: number }).n);
+  }
+
+  get tasks(): TaskStore {
+    return this.taskStore ??= new TaskStore(this.db);
+  }
+
+  get proposals(): ProposalStore {
+    return this.proposalStore ??= new ProposalStore(this.db);
+  }
+
+  get coverage(): CoverageStore {
+    return this.coverageStore ??= new CoverageStore(this.db);
+  }
 
   constructor(cwd: string, configuredPath: string) {
     this.dbPath = isAbsolute(configuredPath) ? configuredPath : resolve(cwd, configuredPath);
@@ -158,6 +202,33 @@ export class AuditLog {
   }
 
   append(event: AuditEvent): number {
+    return this.transaction(() => this.appendEvent(event));
+  }
+
+  recordProposalDisposition(key: string, candidate: string, disposition: Disposition, context: Pick<AuditEvent, "sessionId" | "scopeHash">) {
+    const proposals = this.proposals;
+    return this.transaction(() => {
+      const decision = proposals.setDisposition(key, candidate, disposition);
+      this.appendEvent({ ...context, eventType: "target_proposal_disposition", actor: "operator", target: decision.host,
+        status: "completed", action: disposition, timestampUtc: decision.reviewedAt,
+        summary: disposition === "onboarded" ? "Proposal marked onboarded; host is in configured scope" : "Proposal disposition recorded; scope unchanged" });
+      return decision;
+    });
+  }
+
+  private transaction<T>(work: () => T): T {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const result = work();
+      this.db.exec("COMMIT");
+      return result;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  private appendEvent(event: AuditEvent): number {
     const payload = {
       timestampUtc: event.timestampUtc ?? new Date().toISOString(),
       eventType: event.eventType,
@@ -176,31 +247,24 @@ export class AuditLog {
       scopeHash: event.scopeHash ?? null,
     };
     const payloadJson = JSON.stringify(payload);
-    this.db.exec("BEGIN IMMEDIATE");
-    try {
-      const previous = this.db.prepare("SELECT event_hash FROM audit_events ORDER BY id DESC LIMIT 1").get() as
-        | { event_hash: string }
-        | undefined;
-      const previousHash = previous?.event_hash ?? null;
-      const eventHash = hashText(`${previousHash ?? "GENESIS"}\n${payloadJson}`);
-      const result = this.db.prepare(`
-        INSERT INTO audit_events (
-          timestamp_utc, event_type, session_id, actor, tool_call_id, target, tool, action, status,
-          duration_ms, summary, details_json, content_hash, evidence_path, scope_hash,
-          payload_json, previous_hash, event_hash
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(
-        payload.timestampUtc, payload.eventType, payload.sessionId, payload.actor, payload.toolCallId,
-        payload.target, payload.tool, payload.action, payload.status, payload.durationMs, payload.summary,
-        payload.detailsJson, payload.contentHash, payload.evidencePath, payload.scopeHash,
-        payloadJson, previousHash, eventHash,
-      );
-      this.db.exec("COMMIT");
-      return Number(result.lastInsertRowid);
-    } catch (error) {
-      this.db.exec("ROLLBACK");
-      throw error;
-    }
+    const previous = this.db.prepare("SELECT event_hash FROM audit_events ORDER BY id DESC LIMIT 1").get() as
+      | { event_hash: string }
+      | undefined;
+    const previousHash = previous?.event_hash ?? null;
+    const eventHash = hashText(`${previousHash ?? "GENESIS"}\n${payloadJson}`);
+    const result = this.db.prepare(`
+      INSERT INTO audit_events (
+        timestamp_utc, event_type, session_id, actor, tool_call_id, target, tool, action, status,
+        duration_ms, summary, details_json, content_hash, evidence_path, scope_hash,
+        payload_json, previous_hash, event_hash
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      payload.timestampUtc, payload.eventType, payload.sessionId, payload.actor, payload.toolCallId,
+      payload.target, payload.tool, payload.action, payload.status, payload.durationMs, payload.summary,
+      payload.detailsJson, payload.contentHash, payload.evidencePath, payload.scopeHash,
+      payloadJson, previousHash, eventHash,
+    );
+    return Number(result.lastInsertRowid);
   }
 
   recordScope(snapshot: ScopeSnapshot): string {
@@ -263,24 +327,25 @@ export class AuditLog {
     }
     if (input.operation === "failures") clauses.push("status IN ('failed', 'blocked', 'denied', 'aborted')");
     if (input.operation === "approvals") clauses.push("event_type IN ('operator_approved', 'operator_denied', 'active_checks_armed', 'active_checks_disarmed')");
-    if (input.operation === "artifacts") clauses.push("event_type = 'artifact_modified'");
+    if (input.operation === "artifacts") clauses.push("event_type IN ('artifact_modified', 'artifact_removed')");
     const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
     const rows = this.db.prepare(`SELECT * FROM audit_events ${where} ORDER BY id DESC LIMIT ?`).all(...values, limit) as Record<string, unknown>[];
     return rows.map(rowObject);
   }
 
   verify(): { valid: boolean; events: number; error?: string; finalHash?: string } {
-    const rows = this.db.prepare("SELECT id, payload_json, previous_hash, event_hash FROM audit_events ORDER BY id").all() as Array<{
-      id: number; payload_json: string; previous_hash: string | null; event_hash: string;
-    }>;
+    const events = Number(this.db.prepare("SELECT count(*) AS n FROM audit_events").get()!.n);
     let previous: string | null = null;
-    for (const row of rows) {
-      if (row.previous_hash !== previous) return { valid: false, events: rows.length, error: `broken previous hash at event ${row.id}` };
+    let id = 0;
+    for (const row of this.db.prepare("SELECT * FROM audit_events ORDER BY id").iterate()) {
+      if (row.id !== ++id) return { valid: false, events, error: `unexpected event ID ${row.id}; expected ${id}` };
+      if (row.previous_hash !== previous) return { valid: false, events, error: `broken previous hash at event ${row.id}` };
       const expected = hashText(`${previous ?? "GENESIS"}\n${row.payload_json}`);
-      if (expected !== row.event_hash) return { valid: false, events: rows.length, error: `invalid event hash at event ${row.id}` };
-      previous = row.event_hash;
+      if (expected !== row.event_hash) return { valid: false, events, error: `invalid event hash at event ${row.id}` };
+      if (JSON.stringify(eventFields(row)) !== row.payload_json) return { valid: false, events, error: `displayed fields differ from chained payload at event ${row.id}` };
+      previous = expected;
     }
-    return { valid: true, events: rows.length, finalHash: previous ?? undefined };
+    return { valid: true, events: id, finalHash: previous ?? undefined };
   }
 
   async artifact(path: string, workspaceRoot: string): Promise<{ path: string; size: number; hash: string } | undefined> {
