@@ -3,6 +3,7 @@ import { Type } from "typebox";
 import { bounded, type AuditEvent, type AuditLog } from "./audit.ts";
 import { boardText, HELP_TEXT, nextActions, overviewText, steeringPrompts, type EngagementSnapshot } from "./guide.ts";
 import { proposalHost } from "./proposals.ts";
+import { preflight, scaffoldInventory, startText } from "./start.ts";
 import { normalizeTarget, scopeDecision, type RedteamConfig, type TargetSourceDetail } from "./scope.ts";
 
 type Context = {
@@ -212,6 +213,31 @@ export function registerOperator(pi: ExtensionAPI, deps: OperatorDeps) {
     }),
   });
 
+  deps.registerCommand("rt-start", {
+    description: "Guided start: checks this folder, runs setup if needed, and says exactly what to add and where",
+    handler: guarded(async (_args, ctx) => {
+      let facts = preflight(ctx.cwd);
+      if (ctx.hasUI && (facts.configProblem || !facts.configExists)) {
+        ctx.ui.notify(startText(facts).text, "info");
+        const run = await ctx.ui.confirm("Run the setup wizard now?",
+          `${facts.configExists ? `The configuration needs attention: ${facts.configProblem}.` : "This folder has no engagement configuration yet."}\n\nThe wizard asks for the authorization reference and expiry date, then offers defaults for everything else. It never arms active checks and you can cancel with Escape.`);
+        if (!run) return ctx.ui.notify("Setup not started. Run /rt-start or /rt-setup when you are ready.", "info");
+        await deps.run("rt-setup", "", ctx);
+        facts = preflight(ctx.cwd);
+        if (facts.configProblem || !facts.configExists) return;
+      }
+      const first = facts.inventory[0];
+      if (ctx.hasUI && first && facts.targets === 0 && !first.files.length
+        && await ctx.ui.confirm("Create a target file to fill in?", `This creates ${first.path} with a commented template that explains the format. It contains no targets, so scope stays empty until you add them.`)) {
+        const file = scaffoldInventory(facts);
+        if (file) ctx.ui.notify(`Created ${file}. Open it in your editor and add the authorized targets.`, "info");
+        facts = preflight(ctx.cwd);
+      }
+      const result = startText(facts);
+      ctx.ui.notify(result.text, result.ready ? "info" : "warning");
+    }),
+  });
+
   deps.registerCommand("rt-help", {
     description: "Show the operator guide: workflow and every /rt command",
     handler: guarded(async (_args, ctx) => ctx.ui.notify(HELP_TEXT, "info")),
@@ -243,6 +269,7 @@ export function registerOperator(pi: ExtensionAPI, deps: OperatorDeps) {
         [snapshot.armed ? "Run · disarm active checks" : "Run · arm active checks", go(snapshot.armed ? "rt-disarm" : "rt-arm")],
         ["Audit · recent events", go("rt-log")],
         ["Audit · verify the log", go("rt-log", "verify")],
+        ["Setup · guided start and folder check", go("rt-start")],
         ["Setup · engagement wizard", go("rt-setup")],
         ["Help · command guide", go("rt-help")],
       ];

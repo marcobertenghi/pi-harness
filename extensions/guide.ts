@@ -50,7 +50,7 @@ export function nextActions(snapshot: EngagementSnapshot, now = new Date()): Nex
   const actions: NextAction[] = [];
   const coverage = snapshot.coverage;
   if (snapshot.problem === NO_TARGETS) {
-    actions.push({ command: "/rt-onboard", label: "Add an authorized target", why: "scope is empty: onboard an exact host, or add an inventory file under the configured target sources" });
+    actions.push({ command: "/rt-start", label: "Add the authorized targets", why: "scope is empty: /rt-start shows where the target files go, or use /rt-onboard HOST for a single host" });
   } else if (snapshot.problem) {
     actions.push({ command: "/rt-setup", label: "Fix the engagement configuration", why: snapshot.problem });
   }
@@ -77,7 +77,7 @@ export function nextActions(snapshot: EngagementSnapshot, now = new Date()): Nex
   }
   if (!snapshot.problem) {
     if (!snapshot.scanlensReady) {
-      actions.push({ command: "/rt-help", label: "Import scan data", why: "no Scanlens database yet: import scans outside the agent, then start triage" });
+      actions.push({ command: "/rt-start", label: "Import scan data", why: "no Scanlens database yet: /rt-start shows the exact import command" });
     } else if (!coverage || completion(snapshot).done === 0) {
       actions.push({ command: "/rt-steer", label: "Start scan triage", why: "scan data is ready and nothing has been reviewed yet" });
     } else if (coverage.pending) {
@@ -164,6 +164,7 @@ export const HELP_TEXT = [
   "Red-team harness — operator guide",
   "",
   "START",
+  "  /rt-start           Guided start: checks the folder, runs setup, says what goes where",
   "  /rt                 Menu: where you are, what is next, every action",
   "  /rt-status          Workflow checklist and next steps",
   "  /rt-setup           Engagement wizard (name, expiry, scope, paths)",
@@ -285,5 +286,30 @@ export function boardText(input: BoardInput, now = new Date()): string {
     ...(tasks.length ? tasks : ["  (none)"]),
     "",
     "Add: /rt-tasks add TEXT · Close: /rt-tasks done ID · Reopen: /rt-tasks reopen ID · Include closed: /rt-tasks all",
+  ].join("\n");
+}
+
+/** Shown once when a session starts: what this is, the state of this folder, and where to begin. */
+export function welcomeText(snapshot: EngagementSnapshot, readmePath: string, now = new Date()): string {
+  const configured = Boolean(snapshot.engagement) && (!snapshot.problem || snapshot.problem === NO_TARGETS);
+  const state = !configured
+    ? `No engagement is set up in this folder yet${snapshot.problem ? ` (${snapshot.problem})` : ""}.`
+    : `Engagement: ${snapshot.engagement} · ${authorizationLine(snapshot, now)} · ${snapshot.targets} target(s), ${snapshot.exclusions} excluded`;
+  const first = !configured || snapshot.targets === 0 || !snapshot.scanlensReady
+    ? "  /rt-start   Start here: checks this folder and walks you through what is missing"
+    : "  /rt         Start here: where you are, what is next, and every action";
+  const second = first.includes("/rt-start")
+    ? "  /rt         Menu: where you are, what is next, and every action"
+    : "  /rt-start   Setup check: what this folder contains and what is missing";
+  return [
+    "Welcome to the Pi red-team harness",
+    state,
+    "",
+    first,
+    second,
+    "  /rt-help    All commands on one page",
+    `  Full guide: ${readmePath}`,
+    "",
+    "Active checks are disarmed: every command that contacts a target asks you first. Scope and exclusions always win.",
   ].join("\n");
 }

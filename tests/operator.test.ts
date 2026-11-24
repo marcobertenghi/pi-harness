@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { AuditLog } from "../extensions/audit.ts";
-import { boardText, daysLeft, nextActions, overviewText, panelLines, progressBar, steeringPrompts, workflowStages, type EngagementSnapshot } from "../extensions/guide.ts";
+import { boardText, daysLeft, nextActions, overviewText, panelLines, progressBar, steeringPrompts, welcomeText, workflowStages, type EngagementSnapshot } from "../extensions/guide.ts";
 import redteamExtension from "../extensions/redteam.ts";
 
 const now = new Date("2026-11-24T12:00:00Z");
@@ -27,10 +27,10 @@ test("progress bar and expiry countdown are stable at their edges", () => {
 test("next actions follow the engagement stage", () => {
   const first = (snapshot: Partial<EngagementSnapshot>) => nextActions({ ...base, ...snapshot }, now)[0].command;
   assert.equal(first({ problem: "engagement name is missing" }), "/rt-setup");
-  assert.equal(first({ problem: "scope has no targets", targets: 0 }), "/rt-onboard");
+  assert.equal(first({ problem: "scope has no targets", targets: 0 }), "/rt-start");
   assert.equal(first({ pendingProposals: 2 }), "/rt-proposals");
   assert.equal(first({ coverage: { ...base.coverage!, waiting: 1 } }), "/rt-tasks");
-  assert.equal(first({ scanlensReady: false }), "/rt-help");
+  assert.equal(first({ scanlensReady: false }), "/rt-start");
   assert.equal(first({}), "/rt-steer");
   assert.match(nextActions({ ...base, authorizationExpires: "2026-11-27" }, now)[0].why, /expires in 3 day/);
   assert.ok(nextActions(base, now).some(action => action.command === "/rt-arm"));
@@ -205,4 +205,13 @@ test("the menu leads with the next step and dispatches the chosen action; steeri
   assert.match(ui.editor, /\S/);
   assert.match(ui.notices.at(-1)!, /placed in the editor/);
   assert.match(ui.widget.at(-1)!, /^Next: /);
+});
+
+test("the welcome message names the folder state and the right first command", () => {
+  const fresh = welcomeText({ ...base, engagement: "", problem: "redteam.config.json is missing", targets: 0, scanlensReady: false, coverage: undefined }, "/opt/harness/README.md", now);
+  assert.match(fresh, /^Welcome to the Pi red-team harness\nNo engagement is set up in this folder yet \(redteam\.config\.json is missing\)\.\n\n {2}\/rt-start {3}Start here/);
+  assert.match(fresh, /Full guide: \/opt\/harness\/README\.md/);
+  const running = welcomeText(base, "/opt/harness/README.md", now);
+  assert.match(running, /Engagement: Fixture · authorized to 2027-01-31 \(68d\) · 4 target\(s\), 1 excluded\n\n {2}\/rt {9}Start here/);
+  assert.match(running, /Active checks are disarmed/);
 });

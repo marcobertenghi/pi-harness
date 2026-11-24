@@ -75,7 +75,7 @@ export async function setupConfig(ctx: Pick<ExtensionContext, "cwd" | "hasUI" | 
   if (db === undefined) return cancelled();
   draft.scanlensDb = db;
   for (const key of ["evidenceDir", "toolsDir", "auditDb"] as const) {
-    const value = await ask(`7/8 — ${key}: path for ${key === "auditDb" ? "append-only audit database" : key === "toolsDir" ? "assessment tools and generated artifacts" : "engagement evidence"}`, seed[key], required);
+    const value = await ask(`7/8 — Where to keep ${key === "auditDb" ? "the audit log database" : key === "toolsDir" ? "scripts and tools the agent creates" : "evidence"} (the default is fine for most engagements)`, seed[key], required);
     if (value === undefined) return cancelled();
     draft[key] = value;
   }

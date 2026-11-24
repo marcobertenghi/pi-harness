@@ -62,7 +62,17 @@ pi install --local .
 
 A local install writes a package declaration under `.pi/settings.json`. Pi loads project packages only after project trust is granted. Use `pi list` to confirm configured packages. If Pi is already running, use `/reload` after installation or source changes.
 
-### 3. Run the setup wizard
+### 3. Start with `/rt-start`
+
+In a new engagement folder, run:
+
+```text
+/rt-start
+```
+
+It inspects the folder and prints a numbered checklist: describe the engagement, add the authorized targets, import the scan results, and (optionally) decide on discovery. For each open step it gives the exact folder to put files in or the command to run, including the `scanlens import` command with this folder's database path. If there is no valid configuration it offers to run the setup wizard, and if no target file exists it offers to create a commented template that adds no scope until you fill it in. Run it again at any time to see what is left; the sections below describe each step in detail.
+
+### 3a. The setup wizard
 
 If `redteam.config.json` is missing, invalid, expired, or still contains example values, the extension automatically offers setup. You can start it explicitly at any time:
 
@@ -139,6 +149,7 @@ The skill begins by checking authorization and scope, querying `scanlens guide` 
 | Command | Purpose |
 |---|---|
 | `/rt` | Open the menu: workflow checklist, recommended next steps, and every operator action. |
+| `/rt-start` | Guided start: checks the engagement folder, offers the setup wizard and a target-file template, and lists what is still missing with the exact location or command. |
 | `/rt-help` | Show the operator guide with all commands grouped by purpose. |
 | `/rt-setup` | Run the interactive configuration wizard. Always disarms active checks. |
 | `/rt-status` | Show authorization, the workflow checklist, and what to do next. |

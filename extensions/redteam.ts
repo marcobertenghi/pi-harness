@@ -13,7 +13,8 @@ import { dispositions, proposalEndpoint, proposalHost, type Disposition } from "
 import { registerOperator } from "./operator.ts";
 import { registerDiscovery } from "./discovery-tools.ts";
 import { Budget, type Transport } from "./discovery.ts";
-import { overviewText, panelLines, type EngagementSnapshot } from "./guide.ts";
+import { overviewText, panelLines, welcomeText, type EngagementSnapshot } from "./guide.ts";
+import { fileURLToPath } from "node:url";
 import { artifactChanges, artifactSignature, snapshotArtifacts } from "./artifacts.ts";
 import { isActiveNetworkCommand, networkReferences, referencesProtectedPath } from "./shell.ts";
 import {
@@ -1063,10 +1064,13 @@ export default function redteamExtension(pi: ExtensionAPI, options: { transport?
       summary: problem ?? `${state.config.engagement}: ${state.targets.length} targets, ${state.webEndpoints.length} priority web endpoints`,
       details: { model: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : null },
     });
+    if (ctx.hasUI) {
+      const readme = resolve(dirname(fileURLToPath(import.meta.url)), "..", "README.md");
+      ctx.ui.notify(welcomeText(snapshot(ctx), readme), "info");
+    }
     if (problem === "scope has no targets" && !state.error) {
-      ctx.ui.notify(`Setup saved, but scope has no targets yet. Add authorized targets to .txt, .list, or .csv files in ${state.config.targetSources.join(", ") || "an inventory source configured with /rt-setup"}, or use /rt-setup to add explicit targets. Scope is reread automatically. Active checks remain blocked.`, "warning");
+      ctx.ui.notify(`Scope has no targets yet, so active checks stay blocked. Add authorized targets to a .txt, .list, or .csv file in ${state.config.targetSources.join(", ") || "an inventory folder configured with /rt-setup"}; /rt-start shows the format and what else is missing. Files are reread automatically.`, "warning");
     } else if (problem) await setup(ctx);
-    else if (ctx.hasUI) ctx.ui.notify("Red-team harness ready. /rt opens the menu with your next steps; /rt-help lists every command.", "info");
     refreshPanel(ctx);
   });
 
