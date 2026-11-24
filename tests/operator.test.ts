@@ -60,7 +60,7 @@ test("steering puts the most relevant instruction first", () => {
   assert.equal(steeringPrompts(base)[0].label, "Drive coverage to 100%, pending to 0");
   const withAgent = steeringPrompts({ ...base, agentNext: [{ label: "Validate the manager console", instruction: "Validate finding 12 with one GET.", why: "likely entry point" }] });
   assert.deepEqual([withAgent[0].label, withAgent[0].prompt, withAgent[0].fromAgent], ["Validate the manager console", "Validate finding 12 with one GET.", true]);
-  assert.equal(withAgent.length, 10);
+  assert.equal(withAgent.length, 11);
   assert.match(nextActions({ ...base, agentNext: [{ label: "Validate the manager console", instruction: "x", why: "likely entry point" }] }, now).map(action => `${action.label} (${action.why})`).join("\n"),
     /Validate the manager console \(agent recommends: likely entry point\)/);
   assert.match(panelLines(base, now)[1], /· pending 4 ·/);
@@ -68,7 +68,7 @@ test("steering puts the most relevant instruction first", () => {
   assert.match(rules, /OBJECTIVE: drive coverage to 100% and pending to 0\. Current standing: coverage 60% \(6\/10\), pending 4, waiting on operator 0, blocked 0/);
   assert.match(rules, /\nSTATUS .*\nFOUND .*\nNEED .*\nNEXT /);
   assert.equal(steeringPrompts({ ...base, coverage: { ...base.coverage!, pending: 0 } })[0].label, "Complete the findings register");
-  assert.equal(new Set(steeringPrompts(base).map(item => item.label)).size, 9);
+  assert.equal(new Set(steeringPrompts(base).map(item => item.label)).size, 10);
   assert.equal(steeringPrompts({ ...base, discoveryRuns: 0, discovery: { used: 0, limit: 50 } })[0].label, "Map the attack surface");
 });
 

@@ -52,10 +52,12 @@ test("active-command detection follows wrappers, shell structure, and a wider to
     "time nmap 10.0.0.1", "xargs nmap < hosts", "echo hi\nnmap 10.0.0.1", "if true; then nmap 10.0.0.1; fi", "(nmap 10.0.0.1)",
     "echo $(curl x.test)", 'echo "$(curl x.test)"', "echo `curl x.test`", "bash -c 'nmap 10.0.0.1'", "/usr/bin/nmap 10.0.0.1",
     "ping 10.0.0.1", "ssh root@10.0.0.1", "dig x.test", "ncat 10.0.0.1 80", "socat - TCP:10.0.0.1:80", "telnet 10.0.0.1",
+    "trufflehog github --org=someorg", "trufflehog git https://github.com/a/b",
     "httpx -u x.test", "testssl.sh x.test", "echo > /dev/tcp/10.0.0.1/80", "openssl s_client -connect x.test:443",
   ];
   const inactive = [
     "printf hello", 'echo "curl is fun"', "grep -r curl tools/", "git commit -m 'add nmap wrapper'",
+    "trufflehog filesystem .redteam/evidence",
     "openssl x509 -in cert.pem", "ls | sort", "scanlens summary --db scanlens.db",
   ];
   for (const command of active) assert.equal(isActiveNetworkCommand(command), true, command);
@@ -306,7 +308,55 @@ test("the tool check lists what is installed, what is missing, and one install c
   const text = toolboxText(status, true);
   assert.match(text, /○ Web\n {4}installed: whatweb, [^\n]*\n {4}missing:   httpx-toolkit, nuclei\n {4}note: httpx-toolkit — ProjectDiscovery httpx/);
   assert.match(text, /✓ Core\n/);
+  assert.match(text, /Recommended first:\n  sudo apt update && sudo apt install -y nuclei httpx-toolkit netexec\n/);
+  const { toolPlaybook } = await import("../extensions/toolbox.ts");
+  const playbook = toolPlaybook(toolboxStatus(() => true), ".redteam/evidence").join("\n");
+  assert.match(playbook, /^TOOL PLAYBOOK:[\s\S]*1\. subfinder[\s\S]*2\. dnsx[\s\S]*3\. httpx-toolkit[\s\S]*nuclei -u URL1 -u URL2 -as -ni -duc[\s\S]*trufflehog filesystem DIR --no-verification/);
+  assert.match(toolPlaybook(toolboxStatus(() => true), "e", { nucleiTemplates: false }).join("\n"), /templates are not: tell the operator under NEED to run `nuclei -ut` once/);
+  assert.doesNotMatch(toolPlaybook(status, "e").join("\n"), /nuclei —|nxc —|httpx-toolkit —/, "tools that are not installed are not mentioned");
+  assert.deepEqual(toolPlaybook(toolboxStatus(() => false), "e"), []);
+  for (const command of ["dnsx -l a.fixture.test,b.fixture.test -a -resp -silent", "httpx-toolkit -u app.fixture.test -sc -title", "nuclei -u https://app.fixture.test -as -ni", "nxc smb 10.0.0.5", "subfinder -d fixture.test -silent"]) {
+    assert.equal(isActiveNetworkCommand(command), true, command);
+  }
   assert.match(toolboxBrief(status), /^Installed assessment tools: scanlens, curl,[^\n]*\. Not installed: nxc, httpx-toolkit, nuclei, go\.$/);
   assert.match(toolboxText(toolboxStatus(() => true), false), /Nothing is missing\./);
   assert.equal(toolboxStatus(name => name !== "curl").categories[0].essential, true);
+});
+
+test("only nmap may write a raw scan file, and only into the agent's scans folder", async t => {
+  const { ownScanOutput } = await import("../extensions/shell.ts");
+  const own = (command: string) => ownScanOutput(command, "/work", ".redteam/evidence/scans");
+  assert.equal(own("nmap -sV -p 443 -oX .redteam/evidence/scans/app.xml -oN .redteam/evidence/scans/app.txt app.fixture.test"), true);
+  assert.equal(own("sudo -n nmap -oX /work/.redteam/evidence/scans/a.xml 10.0.0.1"), true);
+  for (const command of [
+    "nmap -oX scan.xml app.fixture.test", "nmap -oX .redteam/evidence/scans/../../../client.xml app.fixture.test",
+    "cat .redteam/evidence/scans/app.xml", "nmap -iL .redteam/evidence/scans/app.xml", "curl -o .redteam/evidence/scans/app.xml https://app.fixture.test/",
+    "nmap -oX .redteam/evidence/scans/a.xml 10.0.0.1; cat client.nessus", "nmap -oX .redteam/evidence/scans/a.xml 10.0.0.1 && cat $(ls *.xml)",
+    "nmap -oN .redteam/evidence/scans/app.txt app.fixture.test",
+  ]) assert.equal(own(command), false, command);
+
+  const { bash, commands, ctx, state, call } = harness(t);
+  state.answer = true;
+  await commands.get("rt-arm")!.handler("", ctx);
+  assert.equal(await bash("nmap -sV -oX .redteam/evidence/scans/app.xml -oN .redteam/evidence/scans/app.txt app.fixture.test"), undefined);
+  assert.match((await bash("nmap -oX out.xml app.fixture.test"))!.reason!, /Raw scan files are prohibited[\s\S]*one exception is nmap writing -oX into \.redteam\/evidence\/scans\//);
+  assert.match((await bash("cat .redteam/evidence/scans/app.xml"))!.reason!, /Raw scan files are prohibited/);
+  assert.match((await bash("nmap -oX .redteam/evidence/scans/x.xml 10.20.0.1"))!.reason!, /excluded/, "the scope check still applies");
+  assert.match((await call("write", { path: ".redteam/evidence/scans/fake.xml", content: "<nmaprun/>" })).result.reason, /written by a scanner, never by hand/);
+  assert.match((await call("read", { path: ".redteam/evidence/scans/app.xml" })).result.reason, /Raw scan files/);
+});
+
+test("screenshots of in-scope pages follow arming; other hosts are refused", async t => {
+  const shot = (url: string) => `timeout 60 chromium --headless --disable-gpu --ignore-certificate-errors --window-size=1366,900 --screenshot=.redteam/evidence/screenshots/app.fixture.test_443_login.png ${url}`;
+  const { bash, commands, ctx, state, prompts } = harness(t);
+  state.answer = false;
+  assert.match((await bash(shot("https://app.fixture.test/login")))!.reason!, /denied by operator/);
+  assert.deepEqual(prompts.splice(0), ["Allow one active check?"]);
+  state.answer = true;
+  await commands.get("rt-arm")!.handler("", ctx);
+  prompts.length = 0;
+  assert.equal(await bash(shot("https://app.fixture.test/login")), undefined);
+  assert.deepEqual(prompts, []);
+  assert.match((await bash(shot("https://evil.example/")))!.reason!, /evil\.example is unknown/);
+  assert.match((await bash("chromium --headless --screenshot=.redteam/evidence/screenshots/x.png"))!.reason!, /Could not identify an explicit/);
 });

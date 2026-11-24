@@ -24,6 +24,10 @@ export interface EngagementSnapshot {
   wildcards?: number;
   /** The agent's own recommendations for what to do next, best first. */
   agentNext?: { label: string; instruction: string; why: string }[];
+  /** Questions the agent filed that the operator has not answered. */
+  openQuestions?: number;
+  /** Automatic runs used and allowed while autopilot is on. */
+  autopilot?: { runs: number; limit: number };
   /** Findings register counts. */
   findings?: { suspected: number; validated: number; reported: number };
   /** Entries in the credential ledger. */
@@ -69,6 +73,9 @@ export function nextActions(snapshot: EngagementSnapshot, now = new Date()): Nex
   }
   if (snapshot.pendingEndpoints) {
     actions.push({ command: "/rt-endpoints", label: "Review discovered routes", why: `${snapshot.pendingEndpoints} route(s) found on in-scope hosts await your decision` });
+  }
+  if (snapshot.openQuestions) {
+    actions.push({ command: "/rt-answer", label: "Answer the agent's questions", why: `${snapshot.openQuestions} question(s) filed while it kept working` });
   }
   if (coverage?.waiting) {
     actions.push({ command: "/rt-tasks", label: "Answer open questions", why: `${coverage.waiting} coverage item(s) wait on a fact only you can supply` });
@@ -160,9 +167,9 @@ export function panelLines(snapshot: EngagementSnapshot, now = new Date()): stri
   const { done, total, percent } = completion(snapshot);
   const next = nextActions(snapshot, now)[0];
   const coverage = snapshot.coverage;
-  const open = (coverage?.waiting ?? 0) + snapshot.openTasks;
+  const open = (coverage?.waiting ?? 0) + snapshot.openTasks + (snapshot.openQuestions ?? 0);
   return [
-    `RT ▸ ${snapshot.engagement || "no engagement"} · ${authorizationLine(snapshot, now)} · ${snapshot.armed ? "● ARMED" : "○ disarmed"} · ${discoveryLabel(snapshot)}`,
+    `RT ▸ ${snapshot.engagement || "no engagement"} · ${authorizationLine(snapshot, now)} · ${snapshot.armed ? "● ARMED" : "○ disarmed"} · ${discoveryLabel(snapshot)}${snapshot.autopilot ? ` · ▶ AUTO ${snapshot.autopilot.runs}/${snapshot.autopilot.limit}` : ""}`,
     `Scope ${snapshot.targets} target(s), ${snapshot.exclusions} excluded · Coverage ${progressBar(done, total, 12)} ${total ? `${percent}% (${done}/${total})` : "not started"} · pending ${coverage?.pending ?? 0} · Needs you ${open} · Proposals ${snapshot.pendingProposals + (snapshot.pendingEndpoints ?? 0)} · ${findingsLabel(snapshot)}`,
     `Next: ${next.command} — ${next.label} (${next.why}) · /rt opens the menu`,
   ];
@@ -209,12 +216,16 @@ export const HELP_TEXT = [
   "",
   "RUN",
   "  /rt-steer           Pick a ready-made instruction for the agent",
+  "  /rt-auto on [RUNS]  Autopilot: the harness starts the agent's next runs by itself",
+  "  /rt-auto off        Stop starting runs · /rt-auto last shows the last digest",
+  "  /rt-pause           Stop autopilot and interrupt the running agent at once",
   "  /rt-arm             Allow in-scope active checks without a prompt",
   "  /rt-disarm          Back to one prompt per active command",
   "",
   "TRACK",
   "  /rt-tasks           Open work: what needs you, what the agent can continue",
   "  /rt-tasks add TEXT  Track a task · /rt-tasks done ID closes it",
+  "  /rt-answer          Answer questions the agent filed while it kept working",
   "  /rt-progress        Completion reconciled with the scan inventory",
   "  /rt-coverage        Coverage counts by state",
   "",
@@ -275,6 +286,8 @@ function builtInPrompts(snapshot: EngagementSnapshot): SteeringPrompt[] {
       prompt: "Drive coverage to 100% and pending to 0. Work through the pending items from redteam_coverage in batches, most valuable first, and record an outcome for each. Do not stop to ask whether to continue: keep going until nothing is pending or you need something only I can give. Park what you cannot resolve as waiting on me or unresolved from outside, with the missing fact. Report as an operator brief." },
     { label: "Review priority web endpoints",
       prompt: "Review the configured priority web endpoints one by one: exact routes only, bounded HEAD/GET requests, no crawling or brute forcing. Record coverage for each and summarize what you observed." },
+    { label: "Screenshot the web endpoints",
+      prompt: "Take one screenshot of every in-scope web endpoint that has none yet under the evidence screenshots folder: the priority endpoints from redteam_scope first, then the root page of each in-scope web service in scanlens. Look at each one, and record in coverage what the page is (login form, admin console, default page, error, placeholder) with the screenshot path as a source. Record anything that stands out, such as an exposed admin or default install page, in redteam_findings as suspected. Report as an operator brief with a count per page type." },
     { label: "Validate the top finding",
       prompt: "List redteam_findings, take the most severe suspected finding and validate it with the least invasive check. Say in one line what the check is before running it, save the evidence, and update the register: validated with its evidence, or a note saying why it looks like a false positive so I can dismiss it." },
     { label: "Report where we stand",
@@ -288,7 +301,7 @@ function builtInPrompts(snapshot: EngagementSnapshot): SteeringPrompt[] {
   ];
   // Put the most relevant instruction first.
   const preferred = snapshot.discovery && !snapshot.discoveryRuns ? 1
-    : !snapshot.coverage || snapshot.coverage.reviewed + snapshot.coverage.grouped === 0 ? 0 : snapshot.coverage.pending ? 2 : 6;
+    : !snapshot.coverage || snapshot.coverage.reviewed + snapshot.coverage.grouped === 0 ? 0 : snapshot.coverage.pending ? 2 : 7;
   return [prompts[preferred], ...prompts.filter((_, index) => index !== preferred)];
 }
 
@@ -315,6 +328,7 @@ export function boardText(input: BoardInput, now = new Date()): string {
   if (snapshot.problem) needsYou.push(`  ! Configuration: ${snapshot.problem} → /rt-setup`);
   const remaining = daysLeft(snapshot.authorizationExpires, now);
   if (!snapshot.problem && remaining !== undefined && remaining <= 7) needsYou.push(`  ! Authorization expires in ${remaining} day(s) → /rt-setup`);
+  if (snapshot.openQuestions) needsYou.push(`  ? ${snapshot.openQuestions} question(s) from the agent → /rt-answer`);
   if (coverage?.waiting) {
     needsYou.push(`  ! ${coverage.waiting} coverage item(s) wait on a fact from you → /rt-steer → Go through the open questions with me`,
       ...sample(input.waiting, coverage.waiting, (item) => `${item.key}${item.missing ? ` — needs: ${item.missing}` : ""}`));

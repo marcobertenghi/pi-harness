@@ -15,6 +15,7 @@ const ACTIVE_TOOLS = new Set([
   "redis-cli", "mysql", "psql", "mongosh",
   "wafw00f", "ssh-audit", "ike-scan", "swaks", "smtp-user-enum", "whois", "theharvester", "shodan", "dnsx", "massdns", "puredns",
   "httpx-toolkit", "arjun", "gau", "waybackurls", "hakrawler", "gowitness", "eyewitness", "aquatone", "s3scanner", "cloud_enum",
+  "chromium", "chromium-browser", "google-chrome", "firefox", "cutycapt", "wkhtmltoimage",
   "nmblookup", "snmp-check", "snmpget", "ntpq", "ldapwhoami", "wapiti", "commix", "dalfox", "tlsx", "asnmap", "fierce", "sublist3r",
 ]);
 
@@ -84,6 +85,8 @@ function commandWord(words: string[]): number {
 
 function isActiveTool(name: string, words: string[]): boolean {
   if (name === "openssl") return words.includes("s_client");
+  // Scanning a local folder is local work; every other source reaches a network service.
+  if (name === "trufflehog") return !words.includes("filesystem");
   return ACTIVE_TOOLS.has(name) || name.startsWith("impacket-");
 }
 
@@ -143,6 +146,27 @@ export function customToolTargets(command: string, cwd: string, toolsDir: string
     }
   }
   return [...found];
+}
+
+const RAW_SCAN_WORD = /\.(?:nessus|nmap|gnmap|xml)$/i;
+
+/**
+ * True when every raw scan file the command names is XML output that nmap itself
+ * writes (-oX) into the agent's own scans directory. That is the one case where
+ * a command may name a raw scan file: the result is imported, never read directly.
+ */
+export function ownScanOutput(command: string, cwd: string, scansDir: string): boolean {
+  let outputs = 0;
+  for (const words of shellSegments(command)) {
+    for (const [index, word] of words.entries()) {
+      if (!RAW_SCAN_WORD.test(word)) continue;
+      const scanner = words.slice(0, index).some((item) => toolName(item) === "nmap");
+      if (!scanner || words[index - 1] !== "-oX" || !isWithin(resolve(cwd, scansDir), resolve(cwd, word))) return false;
+      outputs++;
+    }
+  }
+  // Substitutions and quoted command strings are not unpacked here, so they fail closed.
+  return outputs > 0 && !/\$\(|<\(|`/.test(command) && (command.match(/\.(?:nessus|nmap|gnmap|xml)(?![\w.])/gi) ?? []).length === outputs;
 }
 
 const FILE_WRITERS = new Set([

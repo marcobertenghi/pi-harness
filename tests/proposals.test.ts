@@ -76,7 +76,7 @@ test("onboarded disposition requires confirmation, appends only the exact host, 
     ui: {
       confirm: async () => confirm,
       notify: (message: string) => notices.push(message),
-      setStatus: (_key: string, value: string) => statuses.push(value),
+      setStatus: (key: string, value: string) => { if (key === "redteam") statuses.push(value); },
     } };
   t.after(() => hooks.get("session_shutdown")?.({ reason: "quit" }, ctx));
   const handler = commands.get("rt-proposals")!.handler;

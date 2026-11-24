@@ -283,6 +283,7 @@ export function registerOperator(pi: ExtensionAPI, deps: OperatorDeps) {
         ["Scope · decide discovered routes", go("rt-endpoints")],
         [snapshot.discovery ? "Discover · turn discovery mode off" : "Discover · turn discovery mode on", go("rt-discover", snapshot.discovery ? "off" : "on")],
         ["Discover · status, budget, and passive sources", go("rt-discover")],
+        ["Track · answer the agent's questions", go("rt-answer")],
         ["Track · open work and tasks", go("rt-tasks")],
         ["Track · add a task", async () => {
           const title = await ctx.ui.input("What needs to be done?");
@@ -294,6 +295,8 @@ export function registerOperator(pi: ExtensionAPI, deps: OperatorDeps) {
         ["Results · write the draft report", go("rt-report")],
         ["Results · write a handover note", go("rt-handover")],
         ["Run · steer the agent", go("rt-steer")],
+        [snapshot.autopilot ? "Run · turn autopilot off" : "Run · turn autopilot on", go("rt-auto", snapshot.autopilot ? "off" : "on")],
+        ["Run · pause: stop autopilot and the running agent", go("rt-pause")],
         [snapshot.armed ? "Run · disarm active checks" : "Run · arm active checks", go(snapshot.armed ? "rt-disarm" : "rt-arm")],
         ["Audit · recent events", go("rt-log")],
         ["Audit · verify the log", go("rt-log", "verify")],

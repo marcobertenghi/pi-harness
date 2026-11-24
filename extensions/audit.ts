@@ -8,6 +8,7 @@ import { TaskStore } from "./tasks.ts";
 import { NextStepStore } from "./nextsteps.ts";
 import { FindingStore } from "./findings.ts";
 import { CredentialStore } from "./credentials.ts";
+import { QuestionStore } from "./questions.ts";
 
 export interface AuditEvent {
   timestampUtc?: string;
@@ -157,6 +158,12 @@ export class AuditLog {
 
   get findings(): FindingStore {
     return this.findingStore ??= new FindingStore(this.db);
+  }
+
+  private questionStore?: QuestionStore;
+
+  get questions(): QuestionStore {
+    return this.questionStore ??= new QuestionStore(this.db);
   }
 
   private credentialStore?: CredentialStore;

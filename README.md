@@ -168,6 +168,9 @@ The skill begins by checking authorization and scope, querying `scanlens guide` 
 | `/rt-creds` | Captured credentials: account, where found, which evidence file holds the value, and where it was tried. |
 | `/rt-report` | Write a draft client report to `evidenceDir/reports/` from the findings register, coverage, and audit log. |
 | `/rt-handover` | Write a handover note to `evidenceDir/handover/`: state, next steps, open questions, findings, and what did not work. |
+| `/rt-auto on [RUNS]` / `off` / `last` | Autopilot: let the harness start up to RUNS agent runs by itself (default 10, at most 50), stop it, or show the last digest. `/rt-auto` alone explains when it stops. |
+| `/rt-pause` | Stop autopilot and interrupt the running agent at once. Arming is left as it is. |
+| `/rt-answer [ID [TEXT]]` | Answer questions the agent filed while it kept working: a picker without arguments, or a direct answer; a number picks one of the proposed answers. |
 | `/rt-arm` | After operator confirmation, allow in-scope active checks for the current runtime. |
 | `/rt-disarm` | Immediately return to per-command approval mode. |
 | `/rt-log` | Show the 20 most recent audit events. |
@@ -210,6 +213,37 @@ Objective and reporting: the agent's standing orders are to drive coverage to 10
 
 Tracking: `/rt-tasks` separates work that needs you (configuration problems, an expiring authorization, coverage items waiting on a fact, pending proposals) from work the agent can continue (pending and blocked coverage) and lists tracked tasks. You add tasks with `/rt-tasks add TEXT`; the agent adds and closes its own through the `redteam_tasks` tool. Tasks are stored per engagement in the audit database, and every add, close, and reopen is an audit event. Tasks are notes and never change scope or authorization.
 
+## Autonomy: autopilot, ask-first actions, and questions
+
+The agent works without supervision where it can, and the operator decides what matters. Three mechanisms divide the two, and all of them are enforced by the harness, not left to the agent's judgement.
+
+**Autopilot.** Without it, the agent works through one run and waits for your next message. `/rt-auto on [RUNS]` lets the harness start the next run by itself each time one ends, while there is pending coverage or a suspected finding. Autopilot is your decision, shown in the panel as `▶ AUTO 2/10`, and it never answers a confirmation for you. The harness, not the agent, ends the sequence when:
+
+| Stop condition | Why |
+|---|---|
+| Nothing is left the agent can do alone | No pending coverage and no suspected finding: the work is done or waits on you. |
+| A run made no recorded progress | No coverage item closed, no finding, proposal, credential, task, or question recorded. |
+| A severe finding was validated | Technical impact 3: you should see it before more is done. |
+| You answered a confirmation with no | The agent waits for your direction instead of trying around it. |
+| The guard refused three commands in one run | The agent is working against a limit. |
+| The run limit is reached, authorization is no longer valid, or you pressed Escape | |
+
+When it stops you get a one-screen digest: why it stopped, what changed (coverage before and after, credentials, proposals, questions), what it found, what needs you, and the agent's next steps. `/rt-auto last` shows it again. Each automatic run is recorded in the audit log as started by the harness, and the stop reason is its own event. Autopilot does not survive `/reload` or a restart. If checks are disarmed, every active command still asks you, so autopilot is most useful together with `/rt-arm`.
+
+**Ask-first actions.** Arming removes the prompt for ordinary in-scope checks. A second tier always asks you, armed or not, and states why:
+
+| Kind | Recognized as |
+|---|---|
+| Credential use | Login clients (`ssh`, `ftp`, `xfreerdp`, database clients, …), credential options of `nxc`, `smbclient`, `ldapsearch`, `curl -u`, authorization headers and cookies, null sessions, Impacket tools, password-guessing tools |
+| State-changing requests | `curl`/`wget`/`httpx-toolkit` with POST, PUT, PATCH, DELETE, a request body, or an upload |
+| Intrusive options | `nmap` brute-force, exploit, or vulnerability scripts and aggressive timing; unthrottled `masscan`; path and parameter brute-forcing (`ffuf`, `gobuster`, …); attack tools (`sqlmap`, `nikto`, Metasploit, …); `nuclei` without `-ni` or with intrusive templates; `trufflehog` without `--no-verification` |
+
+Scope comes first: an excluded or unknown target is refused without asking. Declining an ask-first action tells the agent not to retry it in another form, and stops autopilot. This tier reads the command line like the rest of the guard, so it covers the usual forms of known tools; it cannot see what a script the agent wrote does internally.
+
+**Questions.** When the agent needs a fact, a preference, or a decision, it files a question with the `redteam_ask` tool, with proposed answers and what waits on it, and carries on with other work. Open questions count under "Needs you" in the panel. `/rt-answer` walks through them; the agent receives your answers at the start of its next run and is told to update whatever waited on them. An answer is information: it never changes scope and never approves an ask-first action.
+
+`/rt-pause` is the one-step stop: it turns autopilot off and interrupts the running agent.
+
 ## Findings, credentials, report, and handover
 
 **Findings register.** The agent records every plausible issue with the `redteam_findings` tool as soon as it sees it, as `suspected`, and fills in the house-format fields (affected systems, description, evidence, risk, mitigation, OSSTMM category, three ratings) as evidence arrives. A finding can only become `validated` once affected systems, a description, and at least one evidence line exist; that rule applies to you as well. Only you mark a finding `reported` or `dismissed`, and the agent cannot edit either until you reopen it. The panel shows `Findings 3✓ 2?` (validated or reported, and suspected), and suspected findings keep the last workflow stage open.
@@ -219,6 +253,8 @@ Tracking: `/rt-tasks` separates work that needs you (configuration problems, an 
 **Draft report.** `/rt-report` writes `report-YYYYMMDD-HHMMSS.md`. It contains a findings table and each validated finding in the house format, the scope, coverage counts with every item that was not fully reviewed and why, an activity timeline from the audit log, and the audit chain's integrity result and final hash. An internal appendix at the end lists suspected findings, the credential ledger, and open items; remove it before delivery. The command lists what still stands between the draft and a deliverable: validated findings with missing fields, suspected findings, pending coverage. The report is in English and is a draft: it assembles what was recorded and writes no new text, so use `/rt-steer` → "Complete the findings register" first and `/skill:security-findings` for the management summary.
 
 **Handover.** `/rt-handover` writes a note for a colleague or a fresh session: where the engagement stands, the agent's recommended next steps with the exact instruction to send, what waits on the operator, findings and credentials, coverage items that are blocked, recent blocked or denied actions, the last instructions given to the agent, and how to resume.
+
+**Screenshots.** The agent takes one headless-browser screenshot of each in-scope web endpoint it reviews, saves it under `evidenceDir/screenshots/`, looks at it, and records in coverage what the page is: login form, admin console, default install page, error page, or placeholder. Screenshot paths are cited as coverage sources and as evidence lines in findings, so they carry into the report; every file is hashed in the audit log like other evidence. `/rt-steer` → "Screenshot the web endpoints" does the whole inventory in one step. It uses `gowitness` where installed (pointed at the local `chromium`, so it does not download a browser), and plain `chromium` otherwise. A screenshot is a page load only: the agent never types, submits, or clicks. Note that a real browser also fetches whatever the page references (scripts, fonts, trackers on other hosts); the scope guard checks the URL being opened, not those secondary requests. Looking at the image requires a model that accepts images.
 
 ## Attack-surface discovery
 
@@ -249,7 +285,7 @@ A storage name that exists does not prove the client owns it; decide that before
 
 **Passive sources.** A third-party lookup discloses in-scope names to that party, so each source needs `/rt-discover allow HOST`. An approved source is neither in scope nor unknown: a shell command that queries it runs without a prompt while discovery mode is on (charged to the same budget) and asks for one confirmation otherwise. Unapproved third-party hosts stay blocked for recognized network tools.
 
-**Ranges.** Host sweeps of authorized CIDRs use an ordinary in-scope scanner under `/rt-arm`; they are not part of the discovery budget.
+**Scanning.** The agent scans in-scope hosts with `nmap` on its own initiative where the imported scan data is missing, stale, or too thin: targeted hosts and ports, service detection and safe scripts, moderate timing. It writes each scan as XML and text into `evidenceDir/scans/` and loads the XML into the Scanlens database with the `redteam_scan_import` tool, so its own results show up in `scanlens` queries, `/rt-progress`, and coverage like the scans you imported. That folder is the only place the agent may write a raw scan file, only through `nmap -oX`; it cannot hand-write or edit scan files, and the raw scans you supply remain unreadable to it. Every scan passes the scope guard and follows arming. It sweeps a whole authorized CIDR only when you ask. Scans are not part of the discovery budget.
 
 Limits: discovery does not crawl pages, brute-force paths with wordlists, or follow redirects, and its subdomain list is small by design. Supply larger candidate lists yourself if the rules of engagement call for them.
 
@@ -274,6 +310,30 @@ The queue is stored in a separate, mutable table in the configured audit databas
 ## Kali tool awareness
 
 `/rt-tools` checks this machine against the tools an external assessment draws on, grouped by purpose (core, ports and services, web, TLS, DNS and names, exposure and leaks, screenshots, and what is needed to build tools), and prints a single `apt install` command for whatever is missing. The agent receives the same installed and missing lists in its operating rules, so it does not probe for tools or call ones that are absent. It never installs system packages; that stays with you.
+
+Recommended tools, in the order to install them. Only the first group is required:
+
+| Group | Tools | Kali packages | What the agent gains |
+|---|---|---|---|
+| Required | `scanlens`, `curl`, `jq`, `openssl`, `dig`, `whois`, `ncat`, `git`, `python3` | preinstalled on Kali, except `scanlens` | Without these the workflow does not run. |
+| Expected | `nmap`, `chromium`, `testssl`, `sslscan`, `whatweb`, `ffuf` | preinstalled on Kali | Its own scans, screenshots, TLS review, and web fingerprinting. |
+| Recommended | `nuclei` | `nuclei` | Template-based checks for known vulnerabilities and misconfigurations on in-scope services. |
+| Recommended | `httpx-toolkit` | `httpx-toolkit` | Status, title, and technology for many endpoints in one pass. Plain `httpx` on Kali is a different Python client. |
+| Recommended | `subfinder` | `subfinder` | Subdomain names from passive sources, far beyond the built-in list of common labels. |
+| Recommended | `dnsx` | `dnsx` | Resolves name lists, filters catch-all DNS, and shows CNAME targets; the step between `subfinder` and `httpx-toolkit`. |
+| Recommended | `nxc` | `netexec` | Enumeration of exposed SMB, LDAP, WinRM, RDP, MSSQL, SSH, and FTP services. |
+| Recommended | `gowitness` | `gowitness` | Screenshots with status code and title; `chromium` alone is the fallback. |
+| Recommended | `trufflehog` | `trufflehog` | Secret detection in material collected during the engagement. |
+| Optional | `naabu`, `dnsx`, `massdns`, `katana`, `arjun`, `gau`, `gitleaks`, `enum4linux-ng`, `s3scanner`, `cloud_enum`, `go`, `pipx` | see `/rt-tools` | Speed and convenience; the agent can cover most of these with what is above or with its own tools. |
+
+```bash
+sudo apt update && sudo apt install -y nuclei httpx-toolkit subfinder dnsx netexec gowitness trufflehog
+nuclei -ut   # once: download the nuclei templates
+```
+
+The agent's operating rules include a playbook for whichever of these are installed: the order to use them in (names, resolution, web probing, ports, service enumeration, TLS, vulnerability templates, secrets in collected files), the question each one answers, and the exact command with its limits. Targets are passed on the command line in batches of about 20, never through a list file, so every run is scope-checked. `nuclei` is always run without interaction servers and without denial-of-service, fuzzing, intrusive, or brute-force templates, and its hits are recorded as suspected findings to validate. `nxc` is used without credentials. `trufflehog` runs with verification off, so it never tries a found credential against a live service. `subfinder` runs only while discovery mode is on.
+
+Two of these send in-scope names to third parties and should match your rules of engagement: `subfinder` queries many passive data sources, and `nuclei` can reach interaction servers unless run with `-ni`. The scope guard checks the target named on the command line, not those secondary destinations.
 
 The agent is told to write its own tool, without asking, when no installed tool fits, one is missing, or the output is too coarse: a script or small program under `toolsDir`, with targets passed as command-line arguments, the engagement's limits, and output under `evidenceDir`. A script or binary run from `toolsDir` is scope-checked on the hostnames, URLs, and addresses in its arguments, the same as a recognized tool: excluded targets are blocked, in-scope targets follow arming, and unknown hosts ask you. Targets hard-coded inside a script or read from a file are not visible to that check, which is why the agent is instructed to pass them as arguments.
 
