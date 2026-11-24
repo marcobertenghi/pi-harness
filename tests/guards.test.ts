@@ -213,3 +213,100 @@ test("evidence written or removed by a shell command is hashed into the audit tr
   assert.match(artifacts.at(-1)!.contentHash!, /^sha256:[0-9a-f]{64}$/);
   assert.equal(audit.verify().valid, true);
 });
+
+test("the agent cannot change the files that define scope, but can still read them", async t => {
+  const { call, bash, cwd } = harness(t, { targetSources: ["targets"] });
+  mkdirSync(join(cwd, "targets"));
+  writeFileSync(join(cwd, "targets", "hosts.txt"), "10.20.0.7\n");
+  for (const [tool, path] of [["write", "redteam.config.json"], ["edit", "targets/hosts.txt"], ["write", "targets/extra.txt"]]) {
+    assert.match((await call(tool, { path, content: "x" })).result.reason, /operator-controlled/, `${tool} ${path}`);
+  }
+  for (const command of [
+    "echo 10.99.0.1 >> targets/hosts.txt", "printf x >targets/new.txt", "cd targets && echo 10.99.0.1 > hosts.txt", "sed -i s/a/b/ redteam.config.json",
+    "cp /tmp/list.txt targets/extra.txt", "rm targets/hosts.txt", "mv targets/hosts.txt /tmp/", "tee -a targets/hosts.txt",
+  ]) assert.match((await bash(command))!.reason!, /operator-controlled/, command);
+  for (const command of ["cat targets/hosts.txt", "wc -l targets/hosts.txt", "cp targets/hosts.txt .redteam/evidence/hosts-copy.txt", "echo note > .redteam/evidence/note.txt"]) {
+    assert.equal(await bash(command), undefined, command);
+  }
+  assert.equal((await call("read", { path: "targets/hosts.txt" })).result, undefined);
+});
+
+test("arming stays until the operator disarms, except when scope changes under a running agent", async t => {
+  const { bash, commands, hooks, ctx, state, prompts, cwd } = harness(t, { targetSources: ["targets"] });
+  const notices: string[] = [];
+  (ctx.ui as { notify: (text: string) => void }).notify = text => { notices.push(text); };
+  mkdirSync(join(cwd, "targets"));
+  const inventory = join(cwd, "targets", "hosts.txt");
+  writeFileSync(inventory, "10.30.0.1\n");
+  state.answer = true;
+  await commands.get("rt-arm")!.handler("", ctx);
+  prompts.length = 0;
+
+  // The operator edits the inventory between runs: noticed, reported, still armed.
+  writeFileSync(inventory, "10.30.0.1\n10.30.0.2\n");
+  assert.equal(await bash("nmap 10.30.0.2"), undefined);
+  assert.deepEqual(prompts, []);
+  assert.match(notices.at(-1)!, /Scope changed: .* → 4 target\(s\).*stay ● ARMED/);
+
+  // A reload or session switch keeps it; a fresh Pi process does not.
+  await commands.get("rt-status")!.handler("", ctx);
+  await hooks.get("session_start")!({ reason: "reload" }, ctx);
+  assert.ok(notices.some(text => /Kept from before the reload: active checks ● ARMED/.test(text)));
+  assert.equal(await bash("nmap 10.30.0.2"), undefined);
+  assert.deepEqual(prompts, []);
+
+  // The same change while the agent is running disarms as a precaution.
+  await hooks.get("before_agent_start")!({ systemPromptOptions: { sections: {} }, messageType: "user", prompt: "go" }, ctx);
+  writeFileSync(inventory, "10.30.0.1\n10.30.0.2\n10.30.0.3\n");
+  state.answer = false;
+  assert.match((await bash("nmap 10.30.0.3"))!.reason!, /denied by operator/);
+  assert.deepEqual(prompts, ["Allow one active check?"]);
+  assert.ok(notices.some(text => /Scope changed while the agent was running.*DISARMED/.test(text)));
+
+  state.answer = true;
+  await hooks.get("agent_settled")!({ aborted: false }, ctx);
+  await commands.get("rt-arm")!.handler("", ctx);
+  await hooks.get("session_start")!({ reason: "startup" }, ctx);
+  prompts.length = 0;
+  state.answer = false;
+  assert.match((await bash("nmap 10.30.0.2"))!.reason!, /denied by operator/, "a fresh Pi process starts disarmed");
+});
+
+test("purpose-built tools are scope-checked on the hostnames they are given", async t => {
+  const { customToolTargets } = await import("../extensions/shell.ts");
+  const targets = (command: string) => customToolTargets(command, "/work", ".redteam/tools");
+  assert.deepEqual(targets("python3 .redteam/tools/probe.py --host vpn.acme.test --port 443 --out .redteam/evidence/vpn.json"), ["vpn.acme.test"]);
+  assert.deepEqual(targets("./.redteam/tools/sweep.sh mail.acme.test 10.0.0.7").sort(), ["10.0.0.7", "mail.acme.test"]);
+  assert.deepEqual(targets("timeout 30 .redteam/tools/bin/check app.acme.test"), ["app.acme.test"]);
+  assert.deepEqual(targets("python3 .redteam/tools/parse.py .redteam/evidence/app.acme.test-headers.txt"), [], "a file name is not a target");
+  assert.deepEqual(targets("cat .redteam/tools/notes-app.acme.test.md"), [], "reading a tool file is local");
+  assert.deepEqual(targets(`python3 -c "import os.path; print(os.path.sep)"`), [], "one-liners outside the tools directory are not parsed for hostnames");
+  for (const tool of ["wafw00f app.test", "ssh-audit app.test", "ike-scan 10.0.0.1", "swaks --to a@app.test --server app.test", "whois app.test", "theHarvester -d app.test", "httpx-toolkit -u app.test"]) {
+    assert.equal(isActiveNetworkCommand(tool), true, tool);
+  }
+
+  const { bash, commands, ctx, state, prompts } = harness(t);
+  state.answer = false;
+  assert.match((await bash("python3 .redteam/tools/probe.py app.fixture.test"))!.reason!, /denied by operator/, "disarmed: an in-scope run of an own tool asks first");
+  assert.deepEqual(prompts.splice(0), ["Allow one active check?"]);
+  assert.match((await bash("python3 .redteam/tools/probe.py evil.example"))!.reason!, /outside the configured scope was denied/);
+  state.answer = true;
+  await commands.get("rt-arm")!.handler("", ctx);
+  prompts.length = 0;
+  assert.equal(await bash("python3 .redteam/tools/probe.py app.fixture.test --timeout 5"), undefined);
+  assert.deepEqual(prompts, [], "armed: an in-scope run of an own tool needs no prompt");
+  assert.match((await bash("python3 .redteam/tools/probe.py 10.20.0.1"))!.reason!, /excluded/);
+});
+
+test("the tool check lists what is installed, what is missing, and one install command", async () => {
+  const { installCommand, toolboxBrief, toolboxStatus, toolboxText } = await import("../extensions/toolbox.ts");
+  const status = toolboxStatus(name => !["nuclei", "nxc", "go", "httpx-toolkit"].includes(name));
+  assert.deepEqual(status.missing.map(tool => tool.name), ["nxc", "httpx-toolkit", "nuclei", "go"]);
+  assert.equal(installCommand(status.missing), "sudo apt update && sudo apt install -y netexec httpx-toolkit nuclei golang-go");
+  const text = toolboxText(status, true);
+  assert.match(text, /○ Web\n {4}installed: whatweb, [^\n]*\n {4}missing:   httpx-toolkit, nuclei\n {4}note: httpx-toolkit — ProjectDiscovery httpx/);
+  assert.match(text, /✓ Core\n/);
+  assert.match(toolboxBrief(status), /^Installed assessment tools: scanlens, curl,[^\n]*\. Not installed: nxc, httpx-toolkit, nuclei, go\.$/);
+  assert.match(toolboxText(toolboxStatus(() => true), false), /Nothing is missing\./);
+  assert.equal(toolboxStatus(name => name !== "curl").categories[0].essential, true);
+});

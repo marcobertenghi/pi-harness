@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { AuditLog } from "../extensions/audit.ts";
-import { boardText, daysLeft, nextActions, overviewText, panelLines, progressBar, steeringPrompts, welcomeText, workflowStages, type EngagementSnapshot } from "../extensions/guide.ts";
+import { boardText, daysLeft, nextActions, operatorBriefRules, overviewText, panelLines, progressBar, steeringPrompts, welcomeText, workflowStages, type EngagementSnapshot } from "../extensions/guide.ts";
 import redteamExtension from "../extensions/redteam.ts";
 
 const now = new Date("2026-11-24T12:00:00Z");
@@ -44,22 +44,31 @@ test("workflow checklist marks exactly one current stage and the panel names the
   assert.equal(nextActions({ ...base, discoveryRuns: 0 }, now)[0].command, "/rt-discover");
   assert.equal(nextActions({ ...base, discoveryRuns: 0, discovery: { used: 0, limit: 50 } }, now)[0].label, "Map the attack surface");
   assert.equal(nextActions({ ...base, pendingEndpoints: 3 }, now)[0].command, "/rt-endpoints");
-  assert.match(panelLines({ ...base, discovery: { used: 12, limit: 50 }, pendingEndpoints: 3 }, now).join("\n"), /◆ discovery 38\/50[\s\S]*Proposals 3/);
+  assert.match(panelLines({ ...base, discovery: { used: 12, limit: 50 }, pendingEndpoints: 3 }, now).join("\n"), /◆ DISCOVERY ON 38\/50 left[\s\S]*Proposals 3/);
   assert.equal(workflowStages({ ...base, problem: "authorization expired on 2020-01-01" })[0].mark, "blocked");
   const panel = panelLines(base, now);
   assert.equal(panel.length, 3);
   assert.match(panel[0], /Fixture · authorized to 2027-01-31 \(68d\) · ○ disarmed/);
   assert.match(panel[1], /60% \(6\/10\)/);
   assert.match(panel[2], /^Next: \/rt-steer/);
-  assert.match(panelLines({ ...base, armed: true }, now)[0], /● ARMED/);
+  assert.match(panelLines({ ...base, armed: true }, now)[0], /● ARMED · ◇ discovery off$/);
   assert.match(overviewText(base, now), /▸ 5\. Triage and review coverage/);
 });
 
 test("steering puts the most relevant instruction first", () => {
   assert.equal(steeringPrompts({ ...base, coverage: undefined })[0].label, "Start scan triage");
-  assert.equal(steeringPrompts(base)[0].label, "Continue the coverage review");
-  assert.equal(steeringPrompts({ ...base, coverage: { ...base.coverage!, pending: 0 } })[0].label, "Draft client-facing findings");
-  assert.equal(new Set(steeringPrompts(base).map(item => item.label)).size, 8);
+  assert.equal(steeringPrompts(base)[0].label, "Drive coverage to 100%, pending to 0");
+  const withAgent = steeringPrompts({ ...base, agentNext: [{ label: "Validate the manager console", instruction: "Validate finding 12 with one GET.", why: "likely entry point" }] });
+  assert.deepEqual([withAgent[0].label, withAgent[0].prompt, withAgent[0].fromAgent], ["Validate the manager console", "Validate finding 12 with one GET.", true]);
+  assert.equal(withAgent.length, 10);
+  assert.match(nextActions({ ...base, agentNext: [{ label: "Validate the manager console", instruction: "x", why: "likely entry point" }] }, now).map(action => `${action.label} (${action.why})`).join("\n"),
+    /Validate the manager console \(agent recommends: likely entry point\)/);
+  assert.match(panelLines(base, now)[1], /· pending 4 ·/);
+  const rules = operatorBriefRules(base).join("\n");
+  assert.match(rules, /OBJECTIVE: drive coverage to 100% and pending to 0\. Current standing: coverage 60% \(6\/10\), pending 4, waiting on operator 0, blocked 0/);
+  assert.match(rules, /\nSTATUS .*\nFOUND .*\nNEED .*\nNEXT /);
+  assert.equal(steeringPrompts({ ...base, coverage: { ...base.coverage!, pending: 0 } })[0].label, "Complete the findings register");
+  assert.equal(new Set(steeringPrompts(base).map(item => item.label)).size, 9);
   assert.equal(steeringPrompts({ ...base, discoveryRuns: 0, discovery: { used: 0, limit: 50 } })[0].label, "Map the attack surface");
 });
 
@@ -71,7 +80,7 @@ test("open-work board separates operator items, agent items, and tracked tasks",
     proposals: [{ host: "b.test", reason: "seen in certificate" }],
     tasks: [{ id: 3, title: "Ask for VPN access", createdBy: "operator", createdAt: "2026-11-20T10:00:00Z", status: "open" }],
   }, now);
-  assert.match(text, /NEEDS YOU\n {2}! 6 coverage item\(s\) wait on a fact from you\n {6}- endpoint:https:\/\/a\.test\/ — needs: owner confirmation\n {6}- … 5 more/);
+  assert.match(text, /NEEDS YOU\n {2}! 6 coverage item\(s\) wait on a fact from you → \/rt-steer → Go through the open questions with me\n {6}- endpoint:https:\/\/a\.test\/ — needs: owner confirmation\n {6}- … 5 more/);
   assert.match(text, /b\.test — seen in certificate/);
   assert.match(text, /AGENT CAN CONTINUE\n {2}▸ 4 pending coverage item/);
   assert.match(text, /TRACKED TASKS \(1 open\)\n {2}□ #3 \[operator\] Ask for VPN access {2}\(2026-11-20\)/);
@@ -129,7 +138,7 @@ test("rt-onboard adds one exact host after confirmation and rt-offboard removes 
   await run("rt-onboard", "New.Fixture.Test.");
   assert.deepEqual(config().targets, ["10.20.0.0/24", "app.fixture.test", "new.fixture.test"]);
   assert.match(ui.notices.at(-1)!, /★ new\.fixture\.test onboarded/);
-  assert.match(ui.widget[0], /○ disarmed/, "a scope change disarms active checks");
+  assert.match(ui.widget[0], /● ARMED/, "arming is the operator's: a scope change they make keeps it");
   await run("rt-targets", "onboarded");
   assert.match(ui.notices.at(-1)!, /★ ONBOARDED {2}new\.fixture\.test/);
 
@@ -191,7 +200,7 @@ test("tasks are tracked by operator and agent and shown on the board and panel",
 });
 
 test("the menu leads with the next step and dispatches the chosen action; steering fills the editor", async t => {
-  const { run, ui } = harness(t);
+  const { run, ui, tools, ctx } = harness(t);
   ui.selection = options => options.find(option => option.startsWith("Help"));
   await run("rt");
   const menu = ui.menus.at(-1)!;
@@ -205,6 +214,19 @@ test("the menu leads with the next step and dispatches the chosen action; steeri
   assert.match(ui.editor, /\S/);
   assert.match(ui.notices.at(-1)!, /placed in the editor/);
   assert.match(ui.widget.at(-1)!, /^Next: /);
+
+  await tools.get("redteam_next")!("id", { steps: [
+    { label: "Close the 6 TLS items", instruction: "Review the six pending TLS services and record outcomes.", why: "closes 6 pending" },
+    { label: "Validate the admin console", instruction: "Check authentication on the admin console route." },
+  ] }, undefined, undefined, ctx);
+  ui.selection = options => options[0];
+  await run("rt-steer");
+  assert.deepEqual(ui.menus.at(-1)!.slice(0, 3),
+    ["★ Agent recommends: Close the 6 TLS items — closes 6 pending", "★ Agent recommends: Validate the admin console", "▸ Start scan triage"]);
+  assert.equal(ui.editor, "Review the six pending TLS services and record outcomes.");
+  await tools.get("redteam_next")!("id", { steps: [] }, undefined, undefined, ctx);
+  await run("rt-steer");
+  assert.match(ui.menus.at(-1)![0], /^▸ /, "an empty list clears the agent's recommendations");
 });
 
 test("the welcome message names the folder state and the right first command", () => {
@@ -214,4 +236,5 @@ test("the welcome message names the folder state and the right first command", (
   const running = welcomeText(base, "/opt/harness/README.md", now);
   assert.match(running, /Engagement: Fixture · authorized to 2027-01-31 \(68d\) · 4 target\(s\), 1 excluded\n\n {2}\/rt {9}Start here/);
   assert.match(running, /Active checks are disarmed/);
+  assert.match(welcomeText({ ...base, armed: true }, "/opt/harness/README.md", now), /Active checks are ● ARMED/);
 });

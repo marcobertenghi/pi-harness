@@ -107,7 +107,9 @@ export function importCommand(facts: Preflight): string {
 }
 
 /** The numbered setup checklist with, for every open step, exactly what to do. */
-export function startText(facts: Preflight): { text: string; ready: boolean; remaining: number } {
+export interface DiscoverySession { discovery?: { used: number; limit: number }; discoveryRuns?: number }
+
+export function startText(facts: Preflight, session: DiscoverySession = {}): { text: string; ready: boolean; remaining: number } {
   const lines: string[] = [];
   let step = 0;
   let remaining = 0;
@@ -154,9 +156,14 @@ export function startText(facts: Preflight): { text: string; ready: boolean; rem
       "     Move them elsewhere after importing. The agent is blocked from reading them, but they do not belong in its workspace.");
   }
 
-  add(facts.config.passiveSources.length > 0, "Decide on discovery",
-    facts.config.passiveSources.length
-      ? [`Approved passive sources: ${facts.config.passiveSources.join(", ")}. Start a run with /rt-discover on.`]
+  const discoveryOn = session.discovery !== undefined;
+  const discoveryDecided = discoveryOn || (session.discoveryRuns ?? 0) > 0 || facts.config.passiveSources.length > 0;
+  add(discoveryDecided, "Decide on discovery",
+    discoveryDecided
+      ? [discoveryOn
+          ? `◆ Discovery mode is ON: ${session.discovery!.limit - session.discovery!.used} of ${session.discovery!.limit} request(s) left. /rt-steer → Map the attack surface starts a run; /rt-discover off stops it.`
+          : `◇ Discovery mode is off${session.discoveryRuns ? ` (${session.discoveryRuns} run(s) so far)` : ""}. Turn it on with /rt-discover on.`,
+        `Approved passive sources: ${facts.config.passiveSources.join(", ") || "none (/rt-discover allow crt.sh adds certificate-log lookups)"}`]
       : ["Discovery lets the agent look for hosts and routes beyond your list, within a request",
         `budget (default ${facts.config.discoveryBudget}). Turn it on with /rt-discover on once the steps above are done.`,
         ...(facts.wildcards ? [`Your scope has ${facts.wildcards} wildcard domain(s), which is where subdomain discovery applies.`] : []),

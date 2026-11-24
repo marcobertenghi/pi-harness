@@ -5,6 +5,9 @@ import { DatabaseSync } from "node:sqlite";
 import { CoverageStore } from "./coverage.ts";
 import { EndpointProposalStore, ProposalStore, type Disposition } from "./proposals.ts";
 import { TaskStore } from "./tasks.ts";
+import { NextStepStore } from "./nextsteps.ts";
+import { FindingStore } from "./findings.ts";
+import { CredentialStore } from "./credentials.ts";
 
 export interface AuditEvent {
   timestampUtc?: string;
@@ -140,6 +143,32 @@ export class AuditLog {
 
   countEvents(eventType: string): number {
     return Number((this.db.prepare("SELECT count(*) AS n FROM audit_events WHERE event_type = ?").get(eventType) as { n: number }).n);
+  }
+
+  /** Events of the given types, oldest first, for the report timeline and the handover. */
+  eventsOfTypes(eventTypes: string[], limit = 200): { timestampUtc: string; eventType: string; actor: string; status: string; target: string | null; action: string | null; summary: string | null }[] {
+    if (!eventTypes.length) return [];
+    const rows = this.db.prepare(`SELECT timestamp_utc AS timestampUtc, event_type AS eventType, actor, status, target, action, summary
+      FROM audit_events WHERE event_type IN (${eventTypes.map(() => "?").join(", ")}) ORDER BY id DESC LIMIT ?`).all(...eventTypes, Math.max(1, Math.min(limit, 2000)));
+    return (rows as unknown as ReturnType<AuditLog["eventsOfTypes"]>).reverse();
+  }
+
+  private findingStore?: FindingStore;
+
+  get findings(): FindingStore {
+    return this.findingStore ??= new FindingStore(this.db);
+  }
+
+  private credentialStore?: CredentialStore;
+
+  get credentials(): CredentialStore {
+    return this.credentialStore ??= new CredentialStore(this.db);
+  }
+
+  private nextStepStore?: NextStepStore;
+
+  get nextSteps(): NextStepStore {
+    return this.nextStepStore ??= new NextStepStore(this.db);
   }
 
   get tasks(): TaskStore {

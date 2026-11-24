@@ -12,11 +12,13 @@ import { registerAdministration } from "./administration.ts";
 import { dispositions, proposalEndpoint, proposalHost, type Disposition } from "./proposals.ts";
 import { registerOperator } from "./operator.ts";
 import { registerDiscovery } from "./discovery-tools.ts";
+import { registerResults } from "./results-tools.ts";
 import { Budget, type Transport } from "./discovery.ts";
-import { overviewText, panelLines, welcomeText, type EngagementSnapshot } from "./guide.ts";
+import { discoveryLabel, operatorBriefRules, overviewText, panelLines, welcomeText, type EngagementSnapshot } from "./guide.ts";
 import { fileURLToPath } from "node:url";
 import { artifactChanges, artifactSignature, snapshotArtifacts } from "./artifacts.ts";
-import { isActiveNetworkCommand, networkReferences, referencesProtectedPath } from "./shell.ts";
+import { customToolTargets, isActiveNetworkCommand, networkReferences, referencesProtectedPath, writesProtectedPath } from "./shell.ts";
+import { toolboxBrief, toolboxStatus, toolboxText } from "./toolbox.ts";
 import {
   authorizationError,
   isLoopbackTarget,
@@ -67,8 +69,18 @@ function run(command: string, args: string[], cwd: string, signal?: AbortSignal)
   });
 }
 
-export default function redteamExtension(pi: ExtensionAPI, options: { transport?: Transport; discoveryDelayMs?: number } = {}) {
+// Arming and discovery mode are operator decisions, so they survive /reload and
+// session switches within one Pi process. A fresh Pi process always starts disarmed.
+type RuntimeState = { armed: boolean; discoveryBudget?: Budget };
+const runtimeStates: Map<string, RuntimeState> = ((globalThis as Record<symbol, unknown>)[Symbol.for("pi-redteam.runtime")] ??= new Map()) as Map<string, RuntimeState>;
+
+export default function redteamExtension(pi: ExtensionAPI, options: { transport?: Transport; discoveryDelayMs?: number; codeSearchToken?: string } = {}) {
   let armed = false;
+  // True between the start and the end of an agent run.
+  let agentRunning = false;
+  // True while an operator command is rewriting the scope itself.
+  let operatorScopeChange = false;
+  let scopeCounts: string | undefined;
   // Set while the operator has discovery mode on; holds the remaining request budget.
   let discoveryBudget: Budget | undefined;
   let audit: AuditLog | undefined;
@@ -109,20 +121,36 @@ export default function redteamExtension(pi: ExtensionAPI, options: { transport?
         summary: `${state.config.engagement || "unnamed engagement"}: ${state.targets.length} included, ${state.config.excludeTargets.length} excluded, ${state.webEndpoints.length} priority web endpoints`,
         scopeHash: currentScopeHash,
       });
-      if (scopeChangedDuringRuntime) discoveryBudget = undefined;
-      if (scopeChangedDuringRuntime && armed) {
-        armed = false;
-        audit.append({
-          eventType: "active_checks_disarmed",
-          sessionId: sessionId(ctx),
-          actor: "extension",
-          status: "completed",
-          action: "scope-change",
-          summary: "Active checks automatically disarmed because target or endpoint inventory changed",
-          scopeHash: currentScopeHash,
-        });
+      const counts = `${state.targets.length} target(s), ${state.config.excludeTargets.length} excluded, ${state.webEndpoints.length} route(s)`;
+      const before = scopeCounts;
+      scopeCounts = counts;
+      if (scopeChangedDuringRuntime) {
+        // Arming belongs to the operator and survives scope changes the operator makes.
+        // The one exception: scope that changes underneath a running agent, outside an
+        // operator command, could be the agent widening its own scope, so that disarms.
+        const unexpected = agentRunning && !operatorScopeChange && (armed || discoveryBudget !== undefined);
+        if (unexpected) {
+          armed = false;
+          discoveryBudget = undefined;
+          audit.append({
+            eventType: "active_checks_disarmed",
+            sessionId: sessionId(ctx),
+            actor: "extension",
+            status: "completed",
+            action: "scope-change-during-run",
+            summary: "Active checks and discovery disarmed because scope files changed while the agent was running",
+            scopeHash: currentScopeHash,
+          });
+        }
+        const ui = (ctx as { hasUI?: boolean; ui?: { notify?: (text: string, level?: "info" | "warning") => void } });
+        if (ui.hasUI !== false && !operatorScopeChange) {
+          ui.ui?.notify?.(unexpected
+            ? `⚠ Scope changed while the agent was running (${before ?? "?"} → ${counts}). As a precaution, active checks and discovery were DISARMED. Check /rt-targets and /rt-log, then /rt-arm if the change is yours.`
+            : `Scope changed: ${before ?? "?"} → ${counts}. Active checks stay ${armed ? "● ARMED" : "○ disarmed"}; every command is still checked against the new scope.`,
+          unexpected ? "warning" : "info");
+        }
       }
-    }
+    } else scopeCounts ??= `${state.targets.length} target(s), ${state.config.excludeTargets.length} excluded, ${state.webEndpoints.length} route(s)`;
     return audit;
   }
 
@@ -207,6 +235,17 @@ export default function redteamExtension(pi: ExtensionAPI, options: { transport?
     });
   }
 
+  // Files that define scope: the configuration and every inventory source.
+  function scopePaths(cwd: string): string[] {
+    const state = inventory(cwd);
+    return [state.path, ...state.config.targetSources.map((source) => resolve(cwd, source))];
+  }
+
+  function isInside(parent: string, child: string): boolean {
+    const rel = relative(parent, child);
+    return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+  }
+
   function actionFor(tool: string, args: unknown): string {
     const value = args as Record<string, unknown> | undefined;
     if (tool === "redteam_proposals") return String(value?.operation ?? "list");
@@ -268,12 +307,33 @@ export default function redteamExtension(pi: ExtensionAPI, options: { transport?
       result.openTasks = store.tasks.list(scope.key).length;
       result.pendingEndpoints = store.endpointProposals.pendingCount(scope.key);
       result.discoveryRuns = store.countEvents("discovery_run");
+      result.agentNext = store.nextSteps.list(scope.key);
+      const findings = store.findings.counts(scope.key);
+      result.findings = { suspected: findings.suspected, validated: findings.validated, reported: findings.reported };
+      result.credentials = store.credentials.count(scope.key);
     } catch { /* Not configured yet: the panel shows the configuration problem instead. */ }
     return result;
   }
 
+  // Footer status: armed state and discovery mode stay visible at all times, and are
+  // corrected here whenever something disarms them (a scope change, a spent budget).
+  function refreshStatus(ctx: UiContext) {
+    try {
+      if (ctx.hasUI === false) return;
+      const ui = ctx.ui as { setStatus?: (key: string, value: string | undefined) => void };
+      const state = inventory(ctx.cwd);
+      const problem = state.error ?? authorizationError(state.config, state.targets.length);
+      runtimeStates.set(resolve(ctx.cwd), { armed, discoveryBudget });
+      ui.setStatus?.("redteam-discovery", discoveryLabel({ discovery: discoveryBudget ? { used: discoveryBudget.used, limit: discoveryBudget.limit } : undefined }));
+      ui.setStatus?.("redteam", problem ? "RT: inactive" : armed ? "RT: armed" : "RT: disarmed");
+    } catch (error) {
+      console.error(`[pi-redteam] status refresh failed: ${String(error)}`);
+    }
+  }
+
   // The panel above the editor always shows identity, safety state, progress, and the next step.
   function refreshPanel(ctx: UiContext) {
+    refreshStatus(ctx);
     try {
       const ui = ctx.ui as { setWidget?: (key: string, lines: string[] | undefined) => void };
       if (ctx.hasUI !== false) ui.setWidget?.("redteam", panelLines(snapshot(ctx)));
@@ -310,7 +370,7 @@ export default function redteamExtension(pi: ExtensionAPI, options: { transport?
   type ScopeEdit = { targets: string[]; excludeTargets?: string[]; webEndpoints?: string[]; passiveSources?: string[] };
 
   // The single path for operator scope edits: rewrite the config, snapshot the new
-  // scope, disarm, and record the decision. The file is restored if the audit write fails.
+  // scope, and record the decision. Arming is left as the operator set it. The file is restored if the audit write fails.
   function changeScope(ctx: ScopeContext, change: (raw: ScopeEdit) => void, event: Omit<AuditEvent, "sessionId" | "scopeHash">) {
     const loaded = loadConfig(ctx.cwd);
     if (loaded.error) throw new Error(`Cannot update scope: ${loaded.error}`);
@@ -323,20 +383,17 @@ export default function redteamExtension(pi: ExtensionAPI, options: { transport?
     change(raw);
     writeFileSync(loaded.path, `${JSON.stringify(raw, null, 2)}\n`, { mode: 0o600 });
 
+    operatorScopeChange = true;
     try {
-      // Force a new scope snapshot before recording the operator decision. A runtime scope change disarms active checks.
+      // Force a new scope snapshot before recording the operator decision.
       getAudit(ctx);
-      armed = false;
-      discoveryBudget = undefined;
-      ctx.ui.setStatus("redteam", "RT: disarmed");
       if (!log(ctx, event)) throw new Error("Scope audit event could not be recorded.");
     } catch (error) {
       writeFileSync(loaded.path, original, { mode: 0o600 });
-      armed = false;
-      discoveryBudget = undefined;
-      ctx.ui.setStatus("redteam", "RT: disarmed");
       try { getAudit(ctx); } catch { /* Preserve the original audit failure. */ }
       throw error;
+    } finally {
+      operatorScopeChange = false;
     }
   }
 
@@ -363,6 +420,7 @@ export default function redteamExtension(pi: ExtensionAPI, options: { transport?
     disarm: () => { discoveryBudget = undefined; },
     transport: options.transport,
     delayMs: options.discoveryDelayMs,
+    codeSearchToken: options.codeSearchToken,
   });
 
   registerOperator(pi, {
@@ -378,6 +436,21 @@ export default function redteamExtension(pi: ExtensionAPI, options: { transport?
       const handler = commands.get(name);
       if (!handler) throw new Error(`Unknown command /${name}`);
       await handler(args, ctx as unknown as Parameters<typeof handler>[1]);
+    },
+  });
+
+  registerResults(pi, {
+    registerCommand,
+    snapshot,
+    getAudit,
+    reviewScope,
+    inventory,
+    log,
+    recordArtifact: async (ctx, absolutePath, action) => {
+      await logArtifact(ctx, absolutePath, { actor: "operator", tool: "command", action });
+      // Keep the next shell command from being credited with a file the operator's command wrote.
+      const signature = artifactSignature(absolutePath);
+      if (signature) knownArtifacts?.set(absolutePath, signature);
     },
   });
 
@@ -474,7 +547,7 @@ export default function redteamExtension(pi: ExtensionAPI, options: { transport?
           }
           const configureNow = await ctx.ui.confirm(
             "Add exact host to authorized scope?",
-            `Confirm that current written authorization explicitly covers ${host}. This appends only that exact host to redteam.config.json, records an audit event, and disarms active checks. It does not add related hosts, wildcards, routes, or credentials.`,
+            `Confirm that current written authorization explicitly covers ${host}. This appends only that exact host to redteam.config.json and records an audit event. It does not add related hosts, wildcards, routes, or credentials.`,
           );
           if (!configureNow) return;
           addProposalToExplicitScope(ctx, host);
@@ -498,7 +571,7 @@ export default function redteamExtension(pi: ExtensionAPI, options: { transport?
         }
         getAudit(ctx).recordProposalDisposition(current.key, host, disposition, { sessionId: sessionId(ctx), scopeHash: currentScopeHash });
         ctx.ui.notify(disposition === "onboarded"
-          ? `★ ${host} onboarded and now in scope. Active checks are disarmed. Next: /rt-targets to review scope, /rt-arm when you are ready.`
+          ? `★ ${host} onboarded and now in scope. Next: /rt-targets to review scope.`
           : `${host}: ${disposition}. Scope unchanged. See /rt-proposals all for every decision.`, "info");
       } catch (error) {
         ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
@@ -640,17 +713,18 @@ export default function redteamExtension(pi: ExtensionAPI, options: { transport?
   });
 
   async function setup(ctx: Parameters<typeof setupConfig>[0] & { sessionManager: { getSessionId(): string } }) {
-    armed = false;
-    discoveryBudget = undefined;
-    ctx.ui.setStatus("redteam", "RT: disarmed");
-    log(ctx, { eventType: "active_checks_disarmed", actor: "extension", status: "completed", action: "rt-setup" });
+    // The wizard is an operator action: it rewrites scope but leaves arming as the operator set it.
+    operatorScopeChange = true;
     try {
       const saved = await setupConfig(ctx);
+      try { getAudit(ctx); } catch { /* Scope snapshot is retried on the next event. */ }
       log(ctx, { eventType: "setup_completed", actor: "operator", status: saved ? "completed" : "cancelled", action: "rt-setup" });
       const state = inventory(ctx.cwd);
-      ctx.ui.setStatus("redteam", (state.error ?? authorizationError(state.config, state.targets.length)) ? "RT: inactive" : "RT: disarmed");
+      ctx.ui.setStatus("redteam", (state.error ?? authorizationError(state.config, state.targets.length)) ? "RT: inactive" : armed ? "RT: armed" : "RT: disarmed");
     } catch (error) {
-      ctx.ui.notify(`Setup failed; active checks remain disarmed: ${String(error)}`, "error");
+      ctx.ui.notify(`Setup failed; nothing was saved: ${String(error)}`, "error");
+    } finally {
+      operatorScopeChange = false;
     }
   }
 
@@ -664,6 +738,14 @@ export default function redteamExtension(pi: ExtensionAPI, options: { transport?
     handler: async (_args, ctx) => {
       const current = snapshot(ctx);
       ctx.ui.notify(current.problem ? `Red team inactive: ${current.problem}\n\n${overviewText(current)}` : overviewText(current), current.problem ? "error" : "info");
+    },
+  });
+
+  registerCommand("rt-tools", {
+    description: "Check which assessment tools are installed on this machine and how to install the rest",
+    handler: async (_args, ctx) => {
+      const status = toolboxStatus();
+      ctx.ui.notify(toolboxText(status, existsSync("/usr/share/seclists")), status.categories.some((category) => category.essential && category.missing.length) ? "warning" : "info");
     },
   });
 
@@ -694,7 +776,7 @@ export default function redteamExtension(pi: ExtensionAPI, options: { transport?
       });
       ctx.ui.setStatus("redteam", armed ? "RT: armed" : "RT: disarmed");
       ctx.ui.notify(armed
-        ? "● Active checks armed for this session. In-scope commands now run without a prompt; excluded and unknown targets stay blocked. /rt-disarm returns to per-command approval."
+        ? "● Active checks armed. They stay armed until you run /rt-disarm or restart Pi. In-scope commands now run without a prompt; excluded and unknown targets stay blocked."
         : "○ Active checks remain disarmed. Each active command will ask you first.", armed ? "warning" : "info");
     },
   });
@@ -739,15 +821,18 @@ export default function redteamExtension(pi: ExtensionAPI, options: { transport?
       "For coverage, seek a distinct evidence source, not repeated probes. Use existing Scanlens results, audit references, advisories, and operator-supplied artifacts. Record the missing fact and stop if it cannot be established externally. The coverage tool never contacts targets; do not use it to drive autonomous probing.",
       "For priority web endpoints, go deeper but not broader: start with exact supplied routes, use bounded HEAD/GET or harmless protocol negotiation, inspect authentication boundaries, redirects, cookies, security headers, content types, CORS, and bounded error behavior. Use low concurrency and timeouts.",
       discoveryBudget
-        ? `Discovery mode is ON with ${discoveryBudget.remaining} request(s) left. Map the attack surface with redteam_discover before and during triage: well_known for each in-scope web origin, subdomains for each authorized wildcard domain, certificates when crt.sh is an approved passive source, and vhosts for in-scope names on shared servers. Spend the budget where existing evidence suggests more surface. redteam_discover is the only sanctioned way to enumerate.`
+        ? `Discovery mode is ON with ${discoveryBudget.remaining} request(s) left. Map the attack surface with redteam_discover before and during triage: well_known for each in-scope web origin, subdomains for each authorized wildcard domain, certificates when crt.sh is an approved passive source, and vhosts for in-scope names on shared servers. Where the operator approved them, also use the exposure sources: history (web archive URLs), cloud_storage (storage names built from in-scope hostname labels), and code_mentions (public code naming an in-scope domain); redteam_discover status lists the approved sources. Spend the budget where existing evidence suggests more surface. redteam_discover is the only sanctioned way to enumerate.`
         : "Discovery mode is off. If the known surface looks thin (few routes on a web host, a wildcard with few known names), say so and tell the operator that /rt-discover on allows bounded discovery. Do not enumerate another way.",
       "When existing evidence names a route on an in-scope host that is not yet a priority endpoint (a link, redirect, API description, or error page), record it with redteam_proposals operation record_endpoint. Discovered hosts and routes are proposals: the operator accepts them with /rt-proposals and /rt-endpoints.",
       "Outside redteam_discover, never automatically expand a '*' path, brute-force routes, follow a redirect to an unchecked host, submit credentials, or invoke state-changing methods. Treat producer, token, upload, delete, and other action-looking routes as non-mutating checks only unless the operator separately approves a documented safe test.",
       `Keep engagement evidence only under ${state.config.evidenceDir}: command, UTC time, target, result, interpretation, and next hypothesis.`,
       `Create every purpose-built script, helper, downloaded source tree, compiled utility, and tool output only under ${state.config.toolsDir}. Do not scatter tooling elsewhere in the project or install it globally.`,
-      "Prefer existing system tools before writing a helper. Keep custom tooling small, auditable, target-agnostic, and documented; do not claim compromise without evidence.",
+      toolboxBrief(toolboxStatus()),
+      `TOOLING: use an installed tool when it fits the question. When none fits, one is missing, or a tool's output is too coarse to settle the question, write your own without asking: a script or small program under ${state.config.toolsDir} is a normal part of the work, not a last resort. Typical cases are a protocol or API client no tool covers, a precise check of one hypothesis, a parser that turns raw output into evidence, and a comparison across many hosts. Do not give up on an item or mark it unresolved only because no ready-made tool exists.`,
+      `Rules for your own tools: take every target as a command-line argument (never hard-code it or read it from a file the guard cannot see), so each run is scope-checked like any other tool; keep the same limits as the engagement (timeouts, low concurrency, bounded requests, no state-changing or destructive actions); put a one-line purpose and usage at the top; and write output under ${state.config.evidenceDir}. Libraries install into a virtual environment or module folder under ${state.config.toolsDir}, never system-wide. Do not install system packages: if a missing packaged tool would clearly do better, name it in NEED and continue with your own in the meantime. Do not claim compromise without evidence.`,
       "Do not bypass authorization, safety controls, lockouts, or operator denials. If blocked, choose a different in-scope, non-destructive validation path.",
       "Do not perform persistence, destructive actions, denial of service, data destruction, or uncontrolled credential attacks.",
+      ...operatorBriefRules(snapshot(ctx)),
       "Use redteam_tasks to track follow-ups: add a task when something needs the operator or must be revisited, and close tasks you complete. Tasks are notes, never scope or authorization.",
       `Use redteam_audit to answer questions about prior activity. The audit database is ${state.config.auditDb} and must never be edited directly.`,
     ].join("\n");
@@ -759,6 +844,8 @@ export default function redteamExtension(pi: ExtensionAPI, options: { transport?
       summary: bounded(prompt, 512),
       contentHash: hashText(redact(prompt)),
     });
+    // Set last, so a scope edit the operator made while idle is noticed before the run counts as started.
+    agentRunning = true;
   });
 
   pi.on("tool_execution_start", async (event, ctx) => {
@@ -810,6 +897,7 @@ export default function redteamExtension(pi: ExtensionAPI, options: { transport?
     // A failed command may still have written partial output.
     if (event.toolName === "bash") await recordArtifactChanges(ctx, source);
     if (event.toolName.startsWith("redteam_")) refreshPanel(ctx);
+    else refreshStatus(ctx);
   });
 
   pi.on("tool_call", async (event, ctx) => {
@@ -830,8 +918,13 @@ export default function redteamExtension(pi: ExtensionAPI, options: { transport?
 
     const auditOnly = "The audit database is append-only and may only be accessed through redteam_audit.";
     const noRawScans = "Raw scan files are prohibited; query scanlens.db instead.";
+    // Notice a scope change before deciding, so a change made under a running agent
+    // disarms ahead of the command that would benefit from it.
+    try { getAudit(ctx); } catch { /* The audit-write checks below still fail closed. */ }
+    const scopeFilesOnly = "Scope files (redteam.config.json and the target inventory) are operator-controlled. Record a proposal with redteam_proposals instead; the operator changes scope with /rt-onboard, /rt-offboard, /rt-endpoints, or /rt-setup.";
     if (isToolCallEventType("read", event) || isToolCallEventType("write", event) || isToolCallEventType("edit", event)) {
       if (isAuditPath(ctx.cwd, event.input.path)) return block(auditOnly);
+      if (!isToolCallEventType("read", event) && scopePaths(ctx.cwd).some((path) => isInside(path, resolve(ctx.cwd, event.input.path)))) return block(scopeFilesOnly);
       if (isToolCallEventType("read", event) && RAW_SCAN_FILE.test(event.input.path)) return block(noRawScans);
       return;
     }
@@ -853,13 +946,16 @@ export default function redteamExtension(pi: ExtensionAPI, options: { transport?
     const command = event.input.command;
     const state = inventory(ctx.cwd);
     if (referencesProtectedPath(command, ctx.cwd, state.config.auditDb)) return block(auditOnly);
+    if (writesProtectedPath(command, ctx.cwd, scopePaths(ctx.cwd))) return block(scopeFilesOnly);
     if (mentionsRawScan(command)) return block(noRawScans);
 
     // Recognized network tools are checked against every host-like word. Other
     // commands are gated only on unambiguous references: URLs and IP literals.
     const active = isActiveNetworkCommand(command);
     const inspected = withoutPassiveQueries(command, state.config.passiveSources);
-    const commandTargets = active ? obviousTargets(inspected) : networkReferences(inspected).filter((target) => !isLoopbackTarget(target));
+    // A purpose-built tool is checked on the hostnames it is given, like a known tool.
+    const commandTargets = active ? obviousTargets(inspected)
+      : [...new Set([...networkReferences(inspected), ...customToolTargets(inspected, ctx.cwd, state.config.toolsDir)])].filter((target) => !isLoopbackTarget(target));
     if (!active && commandTargets.length === 0) return;
     const decisions = commandTargets.map((target) => ({ target, decision: scopeDecision(target, state.targets, state.config.excludeTargets) }));
     const excluded = decisions.find((item) => item.decision === "excluded");
@@ -1036,6 +1132,7 @@ export default function redteamExtension(pi: ExtensionAPI, options: { transport?
       actor: "agent",
       status: event.aborted ? "aborted" : "completed",
     });
+    agentRunning = false;
     refreshPanel(ctx);
   });
 
@@ -1050,12 +1147,15 @@ export default function redteamExtension(pi: ExtensionAPI, options: { transport?
   });
 
   pi.on("session_start", async (event, ctx) => {
-    armed = false;
-    discoveryBudget = undefined;
-    knownArtifacts = undefined;
     const state = inventory(ctx.cwd);
     const problem = state.error ?? authorizationError(state.config, state.targets.length);
-    ctx.ui.setStatus("redteam", problem ? "RT: inactive" : "RT: disarmed");
+    // A fresh Pi process starts disarmed. A reload or session switch keeps what the operator set.
+    const kept = event.reason === "startup" || problem ? undefined : runtimeStates.get(resolve(ctx.cwd));
+    armed = kept?.armed ?? false;
+    discoveryBudget = kept?.discoveryBudget;
+    agentRunning = false;
+    knownArtifacts = undefined;
+    ctx.ui.setStatus("redteam", problem ? "RT: inactive" : armed ? "RT: armed" : "RT: disarmed");
     log(ctx, {
       eventType: "session_started",
       actor: "system",
@@ -1067,6 +1167,9 @@ export default function redteamExtension(pi: ExtensionAPI, options: { transport?
     if (ctx.hasUI) {
       const readme = resolve(dirname(fileURLToPath(import.meta.url)), "..", "README.md");
       ctx.ui.notify(welcomeText(snapshot(ctx), readme), "info");
+    }
+    if (ctx.hasUI && (armed || discoveryBudget)) {
+      ctx.ui.notify(`Kept from before the ${event.reason}: ${[armed ? "active checks ● ARMED" : "", discoveryBudget ? `discovery ◆ ON (${discoveryBudget.remaining} request(s) left)` : ""].filter(Boolean).join(" and ")}. /rt-disarm and /rt-discover off turn them off.`, "warning");
     }
     if (problem === "scope has no targets" && !state.error) {
       ctx.ui.notify(`Scope has no targets yet, so active checks stay blocked. Add authorized targets to a .txt, .list, or .csv file in ${state.config.targetSources.join(", ") || "an inventory folder configured with /rt-setup"}; /rt-start shows the format and what else is missing. Files are reread automatically.`, "warning");

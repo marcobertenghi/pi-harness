@@ -31,7 +31,7 @@ test("setup gathers reviewed config, uses path defaults, and warns about missing
   assert.deepEqual(result.config.excludeTargets, ["192.0.2.1"]);
   assert.equal(result.config.scanlensDb, "scanlens.db");
   assert.ok(f.notices.some((text) => text.includes("Database not found")));
-  assert.ok(f.notices.some((text) => text.includes("remain disarmed")));
+  assert.ok(f.notices.some((text) => text.includes("Arming is unchanged")));
 });
 
 test("setup saves an empty default inventory, then picks up targets added later", async (t) => {

@@ -25,7 +25,7 @@ export async function setupConfig(ctx: Pick<ExtensionContext, "cwd" | "hasUI" | 
   const seed = loaded.error || isExampleConfig(loaded.config) ? DEFAULT_CONFIG : loaded.config;
   const draft: RedteamConfig = { ...seed, targets: [...seed.targets], excludeTargets: [...seed.excludeTargets], targetSources: [...seed.targetSources] };
   const cancelled = () => {
-    ctx.ui.notify("Setup cancelled; configuration was not changed. Use /rt-setup to start again. Active checks remain disarmed.", "info");
+    ctx.ui.notify("Setup cancelled; configuration was not changed. Use /rt-setup to start again. Arming is unchanged.", "info");
     return false;
   };
   async function ask(title: string, initial: string, validate: (value: string) => string | undefined): Promise<string | undefined> {
@@ -40,7 +40,7 @@ export async function setupConfig(ctx: Pick<ExtensionContext, "cwd" | "hasUI" | 
     }
   }
   const required = (value: string) => value ? undefined : "Please supply a value (Escape cancels setup).";
-  if (!await ctx.ui.confirm("Set up red-team engagement?", "Only enter scope covered by your written authorization. This wizard does not grant permission to test. Escape cancels without saving; active checks remain disarmed.")) return cancelled();
+  if (!await ctx.ui.confirm("Set up red-team engagement?", "Only enter scope covered by your written authorization. This wizard does not grant permission to test. Escape cancels without saving; arming is unchanged.")) return cancelled();
   const name = await ask("1/8 — What is the engagement / written authorization reference?", seed.engagement, (value) => required(value) ?? (value === "Example authorized assessment" ? "Replace the example engagement label." : undefined));
   if (name === undefined) return cancelled();
   draft.engagement = name;
@@ -88,6 +88,6 @@ export async function setupConfig(ctx: Pick<ExtensionContext, "cwd" | "hasUI" | 
   if (current !== original) throw new Error("Configuration changed during setup; nothing saved. Run /rt-setup again.");
   if (draft.targetSources.includes("targets")) mkdirSync(resolve(ctx.cwd, "targets"), { recursive: true });
   writeFileSync(loaded.path, `${JSON.stringify(draft, null, 2)}\n`, { mode: 0o600, flag: original === undefined ? "wx" : "w" });
-  ctx.ui.notify(`Saved ${loaded.path}. Active checks remain disarmed. ${pendingScope ? "Add authorized targets to an inventory file (one IP/hostname or IPv4 CIDR per line), then run /rt-status. Scope is reread automatically; no wizard restart is required." : ready ? "Use /rt-status, then /skill:redteam to begin scan triage." : "Configure/import the scanlens database before triage."} Use /rt-arm only when ready to approve active checks.`, "info");
+  ctx.ui.notify(`Saved ${loaded.path}. Arming is unchanged. ${pendingScope ? "Add authorized targets to an inventory file (one IP/hostname or IPv4 CIDR per line), then run /rt-status. Scope is reread automatically; no wizard restart is required." : ready ? "Use /rt-status, then /skill:redteam to begin scan triage." : "Configure/import the scanlens database before triage."} Use /rt-arm only when ready to approve active checks.`, "info");
   return true;
 }

@@ -91,7 +91,7 @@ The wizard asks for:
 7. evidence, tools, and audit paths;
 8. final operator review and confirmation.
 
-Setup performs no network access and imports no scans. It always disarms active checks. Escape, a declined confirmation, or an error before saving leaves the existing configuration unchanged.
+Setup performs no network access and imports no scans. It never arms active checks and leaves arming as you set it. Escape, a declined confirmation, or an error before saving leaves the existing configuration unchanged.
 
 ### 4. Add authorized targets
 
@@ -151,10 +151,11 @@ The skill begins by checking authorization and scope, querying `scanlens guide` 
 | `/rt` | Open the menu: workflow checklist, recommended next steps, and every operator action. |
 | `/rt-start` | Guided start: checks the engagement folder, offers the setup wizard and a target-file template, and lists what is still missing with the exact location or command. |
 | `/rt-help` | Show the operator guide with all commands grouped by purpose. |
-| `/rt-setup` | Run the interactive configuration wizard. Always disarms active checks. |
+| `/rt-setup` | Run the interactive configuration wizard. Never arms active checks. |
+| `/rt-tools` | Check which assessment tools are installed on this machine, by purpose, and print one command that installs the rest. |
 | `/rt-status` | Show authorization, the workflow checklist, and what to do next. |
-| `/rt-onboard HOST` | Add one exact host or IP to scope after confirming written authorization. Disarms active checks. |
-| `/rt-offboard [HOST]` | Take one exact host out of scope: removes an explicit target, or adds an exclusion when an inventory file or range still covers it. Disarms active checks. |
+| `/rt-onboard HOST` | Add one exact host or IP to scope after confirming written authorization. |
+| `/rt-offboard [HOST]` | Take one exact host out of scope: removes an explicit target, or adds an exclusion when an inventory file or range still covers it. |
 | `/rt-discover` | Show discovery status: mode, remaining budget, approved passive sources, authorized wildcards and ranges. |
 | `/rt-discover on [BUDGET]` / `off` | Let the agent send up to BUDGET bounded discovery requests (default `discoveryBudget`), or stop discovery. |
 | `/rt-discover allow HOST` / `deny HOST` | Approve or remove a third-party passive source such as `crt.sh`. |
@@ -162,6 +163,11 @@ The skill begins by checking authorization and scope, querying `scanlens guide` 
 | `/rt-steer` | Pick a ready-made instruction for the agent; it is placed in the editor for review before sending. |
 | `/rt-tasks [all]` | Open-work board: what needs the operator, what the agent can continue, and tracked tasks. |
 | `/rt-tasks add TEXT` / `done ID` / `reopen ID` | Track, close, or reopen a follow-up task. |
+| `/rt-findings [all]` | Findings register grouped by status: validated, suspected, reported. `/rt-findings ID` shows one in the house format. |
+| `/rt-findings validate\|report\|dismiss\|reopen ID` | Record your decision on one finding. Validating needs affected systems, a description, and evidence. |
+| `/rt-creds` | Captured credentials: account, where found, which evidence file holds the value, and where it was tried. |
+| `/rt-report` | Write a draft client report to `evidenceDir/reports/` from the findings register, coverage, and audit log. |
+| `/rt-handover` | Write a handover note to `evidenceDir/handover/`: state, next steps, open questions, findings, and what did not work. |
 | `/rt-arm` | After operator confirmation, allow in-scope active checks for the current runtime. |
 | `/rt-disarm` | Immediately return to per-command approval mode. |
 | `/rt-log` | Show the 20 most recent audit events. |
@@ -185,8 +191,8 @@ The model-facing tools are normally called by the agent rather than typed as sla
 A three-line panel above the editor is always visible in interactive mode and refreshes after every `/rt` command, agent run, and tracking-tool call:
 
 ```text
-RT ▸ Fixture · authorized to 2027-01-31 (68d) · ○ disarmed
-Scope 4 target(s), 1 excluded · Coverage ███████░░░░░ 60% (6/10) · Needs you 2 · Proposals 1
+RT ▸ Fixture · authorized to 2027-01-31 (68d) · ○ disarmed · ◇ discovery off
+Scope 4 target(s), 1 excluded · Coverage ███████░░░░░ 60% (6/10) · pending 4 · Needs you 2 · Proposals 1 · Findings 3✓ 2?
 Next: /rt-proposals — Review scope proposals (1 host(s) proposed by the agent await your decision) · /rt opens the menu
 ```
 
@@ -194,13 +200,25 @@ Next: /rt-proposals — Review scope proposals (1 host(s) proposed by the agent 
 
 Changing scope during an engagement:
 
-- `/rt-onboard HOST` adds one exact host or IP. It asks you to confirm that written authorization covers it, appends only that host to `targets`, records a `scope_target_onboarded` audit event, and disarms active checks. `/rt-targets` then marks it `★ ONBOARDED`.
+- `/rt-onboard HOST` adds one exact host or IP. It asks you to confirm that written authorization covers it, appends only that host to `targets`, and records a `scope_target_onboarded` audit event. `/rt-targets` then marks it `★ ONBOARDED`.
 - `/rt-offboard HOST` takes one exact host out. An explicit target is removed from `targets`; a host that an inventory file, CIDR, or wildcard still covers is added to `excludeTargets` instead, because inventory files are never edited. The confirmation dialog states which of the two will happen. Evidence and coverage notes are kept.
 - `/rt-proposals` decides hosts the agent proposed. Ranges, wildcards, and removing an exclusion still go through `/rt-setup`.
 
 Steering: `/rt-steer` offers instructions such as "Start scan triage", "Continue the coverage review", "Report where we stand", and "Pause active work", ordered by relevance to the current stage. The chosen text goes into the editor, so you can edit it before pressing Enter. A message sent while the agent is working is delivered as steering; Escape interrupts it.
 
+Objective and reporting: the agent's standing orders are to drive coverage to 100% and pending to 0, working through pending items in batches without asking whether to continue, and to park what it cannot settle as waiting on the operator, unresolved from outside, or blocked. It reports as a short operator brief ending in four fixed lines (`STATUS`, `FOUND`, `NEED`, `NEXT`), with detail in evidence files. Before ending a run it publishes its recommended next steps through the `redteam_next` tool; they appear at the top of `/rt-steer` as "★ Agent recommends", and the first one becomes the panel's "Next:" line once nothing is waiting on you. The panel also shows the pending count next to the coverage percentage.
+
 Tracking: `/rt-tasks` separates work that needs you (configuration problems, an expiring authorization, coverage items waiting on a fact, pending proposals) from work the agent can continue (pending and blocked coverage) and lists tracked tasks. You add tasks with `/rt-tasks add TEXT`; the agent adds and closes its own through the `redteam_tasks` tool. Tasks are stored per engagement in the audit database, and every add, close, and reopen is an audit event. Tasks are notes and never change scope or authorization.
+
+## Findings, credentials, report, and handover
+
+**Findings register.** The agent records every plausible issue with the `redteam_findings` tool as soon as it sees it, as `suspected`, and fills in the house-format fields (affected systems, description, evidence, risk, mitigation, OSSTMM category, three ratings) as evidence arrives. A finding can only become `validated` once affected systems, a description, and at least one evidence line exist; that rule applies to you as well. Only you mark a finding `reported` or `dismissed`, and the agent cannot edit either until you reopen it. The panel shows `Findings 3✓ 2?` (validated or reported, and suspected), and suspected findings keep the last workflow stage open.
+
+**Credential ledger.** When the agent finds a credential, hash, token, or key, it writes the value to a file under `evidenceDir/loot/` and records the account, where it was found, and that file's path with `redteam_credentials`. The ledger holds no secret values, so `/rt-creds`, the report, and the handover can list it safely. Each attempt to use a credential is recorded per target with its result (`valid`, `invalid`, `locked_out`, `error`), which shows where a credential was already tried and where it was not. A test against a host outside scope cannot be recorded. Trying a credential remains an active check that you approve.
+
+**Draft report.** `/rt-report` writes `report-YYYYMMDD-HHMMSS.md`. It contains a findings table and each validated finding in the house format, the scope, coverage counts with every item that was not fully reviewed and why, an activity timeline from the audit log, and the audit chain's integrity result and final hash. An internal appendix at the end lists suspected findings, the credential ledger, and open items; remove it before delivery. The command lists what still stands between the draft and a deliverable: validated findings with missing fields, suspected findings, pending coverage. The report is in English and is a draft: it assembles what was recorded and writes no new text, so use `/rt-steer` → "Complete the findings register" first and `/skill:security-findings` for the management summary.
+
+**Handover.** `/rt-handover` writes a note for a colleague or a fresh session: where the engagement stands, the agent's recommended next steps with the exact instruction to send, what waits on the operator, findings and credentials, coverage items that are blocked, recent blocked or denied actions, the last instructions given to the agent, and how to resume.
 
 ## Attack-surface discovery
 
@@ -208,7 +226,7 @@ The harness reviews what it was given in depth; discovery widens what it is give
 
 **Routes.** The agent records routes it sees on in-scope hosts (links, redirects, API descriptions) with `redteam_proposals` `record_endpoint`. `/rt-endpoints` lists them; accepting a route adds the exact URL to `webEndpoints` in `redteam.config.json`, which makes it a priority endpoint and opens a pending coverage item. The host must already be in scope, so accepting routes never widens host scope.
 
-**Discovery mode.** `/rt-discover on [BUDGET]` arms the `redteam_discover` tool for a fixed number of requests. It is separate from `/rt-arm`, turns off when the budget is used or the scope changes, and every run is a `discovery_run` audit event. The tool offers four bounded operations:
+**Discovery mode.** `/rt-discover on [BUDGET]` arms the `redteam_discover` tool for a fixed number of requests. It is separate from `/rt-arm`, turns off when the budget is used, and every run is a `discovery_run` audit event. The tool offers four bounded operations against the client's own surface:
 
 | Operation | What it sends | Where results go |
 |---|---|---|
@@ -218,6 +236,16 @@ The harness reviews what it was given in depth; discovery widens what it is give
 | `vhosts` | One GET per in-scope name against an in-scope origin, compared with a baseline for an unknown name. | Reported to the agent only |
 
 Requests are sent sequentially with a short delay, or five at a time for DNS.
+
+**Exposure sources.** Three further operations ask third parties what they know about the client. None of them contacts the client's systems, and each needs its own approved passive source:
+
+| Operation | Passive source to approve | What it sends | Where results go |
+|---|---|---|---|
+| `history` | `web.archive.org` | One query for URLs the web archive has seen under an in-scope domain. Query strings are dropped, static files are skipped. | Routes on in-scope hosts → `/rt-endpoints`; unknown hosts → `/rt-proposals` |
+| `cloud_storage` | `s3.amazonaws.com`, `storage.googleapis.com`, `blob.core.windows.net` | For up to four names, each of which must be a label of an in-scope hostname, 14 variants (`name`, `name-backup`, `name-dev`, …) per approved provider: one unauthenticated request each, or a DNS lookup for Azure. Reports only whether the name exists and whether it lists publicly. Contents are never read. | Existing names → `/rt-proposals`, marked "ownership not verified" |
+| `code_mentions` | `api.github.com` | One search of public code for an in-scope domain. Needs a token in the `RT_GITHUB_TOKEN` environment variable, set before starting Pi; the token is never logged or shown to the agent. | Repository and file path, reported to the agent only |
+
+A storage name that exists does not prove the client owns it; decide that before anything else touches it. Archived URLs may be gone. Leaked-credential databases are not queried: the usable ones need a paid key and proof of domain ownership, so bring those results in as an operator-supplied evidence file.
 
 **Passive sources.** A third-party lookup discloses in-scope names to that party, so each source needs `/rt-discover allow HOST`. An approved source is neither in scope nor unknown: a shell command that queries it runs without a prompt while discovery mode is on (charged to the same budget) and asks for one confirmation otherwise. Unapproved third-party hosts stay blocked for recognized network tools.
 
@@ -245,7 +273,11 @@ The queue is stored in a separate, mutable table in the configured audit databas
 
 ## Kali tool awareness
 
-The red-team skill names `scanlens` for existing scanner evidence, `jq` and `diff` for local comparison, and `openssl x509` for saved certificates. It identifies `curl` and OpenSSL as options for operator-directed HTTP/TLS metadata collection. Tool availability does not grant authorization; live activity remains under human supervision. No new remote tools or wrappers are required.
+`/rt-tools` checks this machine against the tools an external assessment draws on, grouped by purpose (core, ports and services, web, TLS, DNS and names, exposure and leaks, screenshots, and what is needed to build tools), and prints a single `apt install` command for whatever is missing. The agent receives the same installed and missing lists in its operating rules, so it does not probe for tools or call ones that are absent. It never installs system packages; that stays with you.
+
+The agent is told to write its own tool, without asking, when no installed tool fits, one is missing, or the output is too coarse: a script or small program under `toolsDir`, with targets passed as command-line arguments, the engagement's limits, and output under `evidenceDir`. A script or binary run from `toolsDir` is scope-checked on the hostnames, URLs, and addresses in its arguments, the same as a recognized tool: excluded targets are blocked, in-scope targets follow arming, and unknown hosts ask you. Targets hard-coded inside a script or read from a file are not visible to that check, which is why the agent is instructed to pass them as arguments.
+
+The red-team skill names `scanlens` for existing scanner evidence, `jq` and `diff` for local comparison, and `openssl x509` for saved certificates. It identifies `curl` and OpenSSL as options for operator-directed HTTP/TLS metadata collection. Tool availability does not grant authorization; live activity remains under human supervision. Only the core group is required; everything else widens what the agent can do.
 
 ## Client-facing findings
 
@@ -259,7 +291,7 @@ Use `/skill:security-findings` with evidence-backed notes or an existing draft. 
 
 Pi can log a candidate exact hostname or IP, its evidence reference, and why it may be relevant via `redteam_proposals`. Proposals are deduplicated per engagement and kept in a separate table in the audit database. They are notes, not scope entries: recording or reviewing a proposal neither contacts the host nor changes authorization. `/rt-proposals` shows the latest entries and their current configured scope match (`included`, `excluded`, or `unknown`); this is not a substitute for checking authorization validity.
 
-Run `/rt-proposals` to choose a pending proposal and then select `onboarded`, `deferred`, or `rejected` interactively; `/rt-proposals all` also shows reviewed entries. The explicit `/rt-proposals DISPOSITION HOST` form remains available. Onboarding is a focused operator-controlled scope update rather than a rerun of the full setup wizard: after an explicit confirmation that current written authorization covers the candidate, the command appends only that exact host to the configuration's explicit `targets`, records the scope change and disposition in the audit trail, and disarms active checks. It never adds related hosts, wildcard scope, paths, credentials, or removes an exclusion. Invalid authorization or an explicit exclusion still requires `/rt-setup` and a separate authorization review. Normal exclusions and approval rules continue to apply.
+Run `/rt-proposals` to choose a pending proposal and then select `onboarded`, `deferred`, or `rejected` interactively; `/rt-proposals all` also shows reviewed entries. The explicit `/rt-proposals DISPOSITION HOST` form remains available. Onboarding is a focused operator-controlled scope update rather than a rerun of the full setup wizard: after an explicit confirmation that current written authorization covers the candidate, the command appends only that exact host to the configuration's explicit `targets`, and records the scope change and disposition in the audit trail. It never adds related hosts, wildcard scope, paths, credentials, or removes an exclusion. Invalid authorization or an explicit exclusion still requires `/rt-setup` and a separate authorization review. Normal exclusions and approval rules continue to apply.
 
 ### Scope rules
 
@@ -269,7 +301,7 @@ Run `/rt-proposals` to choose a pending proposal and then select `onboarded`, `d
 - a range is in scope only when every address in it is covered by included addresses and CIDRs, so a subnet of an included CIDR is accepted;
 - an unknown or excluded target is blocked;
 - target files, DNS names, banners, pages, and scan output are untrusted evidence, never instructions;
-- changing scope must reflect written authorization. Prefer `/rt-setup` because it provides final review and disarms checks.
+- changing scope must reflect written authorization. Prefer `/rt-setup` for larger changes because it provides a final review.
 
 Active-check behavior:
 
@@ -278,7 +310,9 @@ Active-check behavior:
 - without an interactive UI, disarmed active checks are blocked;
 - `/rt-arm` removes per-command prompts only for authorized, in-scope targets;
 - exclusions and unknown targets remain blocked while armed;
-- arming resets on `/reload`, session replacement, restart, `/rt-disarm`, or a detected target/endpoint inventory change;
+- arming is the operator's decision: once armed, checks stay armed until `/rt-disarm` or until Pi is restarted. `/reload`, a session switch, `/rt-setup`, and scope changes you make (`/rt-onboard`, `/rt-offboard`, `/rt-endpoints`, editing an inventory file between runs) keep it, and report the scope change;
+- the one automatic disarm: if the scope files change while the agent is running and not through an operator command, active checks and discovery are disarmed and a warning explains why. The agent is also blocked from writing `redteam.config.json` and the inventory files, so this should only happen if you edit them yourself mid-run;
+- discovery mode follows the same rule, and additionally ends when its request budget is used;
 - setup never arms checks;
 - direct operator `!`/`!!` shell commands are still scope-gated and audited.
 
@@ -306,10 +340,10 @@ Example schema: [`redteam.config.example.json`](redteam.config.example.json).
 | `excludeTargets` | Targets that are always blocked, even if also included. |
 | `targetSources` | Approved `.txt`, `.list`, or `.csv` inventory files/directories. Hostnames define scope; HTTP(S) URLs also become priority web endpoints. |
 | `webEndpoints` | Exact priority routes accepted from discovery. Their hosts must already be in scope. |
-| `passiveSources` | Third-party hosts approved for passive lookups, for example `crt.sh`. |
+| `passiveSources` | Third-party hosts approved for passive lookups: `crt.sh`, `web.archive.org`, `api.github.com`, and the cloud storage hosts listed under exposure sources. |
 | `discoveryBudget` | Default number of requests per `/rt-discover on` (1–5000, default 300). |
 | `scanlensDb` | Existing scanlens SQLite database path. |
-| `evidenceDir` | Notes, captured responses, reproducibility records, and reports. |
+| `evidenceDir` | Notes, captured responses, and reproducibility records. The harness writes `reports/` and `handover/` here, and the agent keeps captured secret values in `loot/`. |
 | `toolsDir` | Purpose-built scripts, source trees, builds, temporary wordlists, and tool-generated artifacts. |
 | `auditDb` | Append-only SQLite activity database queried only through `redteam_audit`. |
 
@@ -436,7 +470,7 @@ Confirm the exact authorized name and whether an approved VPN or split-DNS envir
 
 ### Active checks unexpectedly require approval
 
-`/reload`, session replacement, restart, `/rt-setup`, and `/rt-disarm` reset arming. Run `/rt-status`, then `/rt-arm` if the engagement is still authorized and you want session-wide approval.
+Only `/rt-disarm`, a Pi restart, or a scope-file change made while the agent was running reset arming; the last one shows a warning and an `active_checks_disarmed` event with action `scope-change-during-run` in `/rt-log`. Run `/rt-status`, then `/rt-arm` if the engagement is still authorized.
 
 ## Development
 

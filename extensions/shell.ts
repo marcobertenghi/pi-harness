@@ -1,5 +1,5 @@
 import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
-import { explicitTargets } from "./scope.ts";
+import { explicitTargets, obviousTargets } from "./scope.ts";
 
 // Heuristic shell inspection for the command guards. This is not a sandbox: it
 // recognizes common command shapes and fails closed where a shape is ambiguous.
@@ -13,6 +13,9 @@ const ACTIVE_TOOLS = new Set([
   "hping3", "traceroute", "tracepath", "mtr", "dig", "nslookup", "host", "dnsrecon", "dnsenum", "amass", "subfinder",
   "testssl", "testssl.sh", "sslscan", "sslyze", "msfconsole", "responder", "certipy", "bloodhound-python",
   "redis-cli", "mysql", "psql", "mongosh",
+  "wafw00f", "ssh-audit", "ike-scan", "swaks", "smtp-user-enum", "whois", "theharvester", "shodan", "dnsx", "massdns", "puredns",
+  "httpx-toolkit", "arjun", "gau", "waybackurls", "hakrawler", "gowitness", "eyewitness", "aquatone", "s3scanner", "cloud_enum",
+  "nmblookup", "snmp-check", "snmpget", "ntpq", "ldapwhoami", "wapiti", "commix", "dalfox", "tlsx", "asnmap", "fierce", "sublist3r",
 ]);
 
 // Commands that run another command given in their arguments.
@@ -120,6 +123,63 @@ export function networkReferences(command: string): string[] {
     }
   }
   return [...found];
+}
+
+/**
+ * Hostnames, URLs, and addresses passed as arguments to a script or binary kept
+ * in the tools directory. A purpose-built tool is scope-checked like a known one,
+ * so writing a tool never becomes a way around the scope guard.
+ */
+export function customToolTargets(command: string, cwd: string, toolsDir: string): string[] {
+  const root = resolve(cwd, toolsDir);
+  const found = new Set<string>();
+  for (const text of commandTexts(command)) {
+    for (const words of shellSegments(text)) {
+      const start = commandWord(words);
+      if (LOCAL_COMMANDS.has(toolName(words[start]))) continue;
+      const tool = words.findIndex((word, index) => index >= start && !word.startsWith("-") && /[\w/]/.test(word) && isWithin(root, resolve(cwd, word)) && resolve(cwd, word) !== root);
+      if (tool < 0) continue;
+      for (const target of obviousTargets(words.slice(tool + 1).join(" "))) found.add(target);
+    }
+  }
+  return [...found];
+}
+
+const FILE_WRITERS = new Set([
+  "tee", "sed", "rm", "mv", "cp", "touch", "truncate", "dd", "install", "ln", "chmod", "chown", "rsync", "shred", "unlink", "patch",
+  "vi", "vim", "nano", "ed",
+]);
+// For these, only the last operand is written to.
+const COPY_COMMANDS = new Set(["cp", "rsync", "install", "ln"]);
+
+/**
+ * True when a command appears to create, change, or delete one of the protected
+ * files or anything inside a protected directory. Reading them stays allowed,
+ * so `nmap -iL targets/hosts.txt` passes while `echo x >> targets/hosts.txt` does not.
+ */
+export function writesProtectedPath(command: string, cwd: string, protectedPaths: string[]): boolean {
+  const segments = commandTexts(command).flatMap(shellSegments);
+  // A `cd` into a protected directory makes later relative names resolve inside it.
+  const entered = segments.filter((words) => ["cd", "pushd"].includes(toolName(words[0])) && words[1])
+    .map((words) => resolve(cwd, words[1])).filter((path) => protectedPaths.some((target) => isWithin(target, path)));
+  for (const words of segments) {
+    const names = words.map(toolName);
+    const redirects = words.some((word) => /^\d*>/.test(word));
+    const writers = names.filter((name) => FILE_WRITERS.has(name));
+    if (!redirects && !writers.length) continue;
+    const copyOnly = !redirects && writers.every((name) => COPY_COMMANDS.has(name));
+    for (const raw of copyOnly ? words.slice(-1) : words) {
+      const word = raw.replace(/^\d*>+&?/, "").replace(/^--?[\w-]+=/, "");
+      if (!word || word.startsWith("-")) continue;
+      const bases = [cwd, ...entered];
+      for (const base of bases) {
+        const path = resolve(base, word);
+        if (protectedPaths.some((target) => isWithin(target, path))) return true;
+        if (/[*?[]/.test(word) && protectedPaths.some((target) => globPattern(word).test(relative(cwd, target)) || globPattern(word).test(basename(target)))) return true;
+      }
+    }
+  }
+  return false;
 }
 
 function globPattern(glob: string): RegExp {

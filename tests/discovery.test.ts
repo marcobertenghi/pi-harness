@@ -84,12 +84,13 @@ function harness(t: { after(fn: () => void): void }) {
     registerTool: (tool: { name: string; execute: (...args: any[]) => Promise<any> }) => tools.set(tool.name, tool.execute),
     on: (event: string, hook: (...args: any[]) => Promise<any>) => hooks.set(event, hook),
   } as unknown as ExtensionAPI, { transport, discoveryDelayMs: 0 });
-  const ui = { answer: true, notices: [] as string[], prompts: [] as string[], widget: [] as string[] };
+  const ui = { answer: true, notices: [] as string[], prompts: [] as string[], widget: [] as string[], status: {} as Record<string, string | undefined> };
   const ctx = {
     cwd, hasUI: true, sessionManager: { getSessionId: () => "session-test" },
     ui: {
       confirm: async (title: string) => { ui.prompts.push(title); return ui.answer; },
-      select: async () => undefined, notify: (text: string) => { ui.notices.push(text); }, setStatus() {},
+      select: async () => undefined, notify: (text: string) => { ui.notices.push(text); },
+      setStatus: (key: string, value: string | undefined) => { ui.status[key] = value; },
       setWidget: (_key: string, lines: string[]) => { ui.widget = lines; },
     },
   };
@@ -111,7 +112,10 @@ test("discovery needs operator arming, records findings as proposals, and accept
 
   await run("rt-discover", "on 40");
   assert.match(ui.notices.at(-1)!, /◆ Discovery mode on with a budget of 40/);
-  assert.match(ui.widget[0], /◆ discovery 40\/40/);
+  assert.match(ui.widget[0], /◆ DISCOVERY ON 40\/40 left/);
+  assert.equal(ui.status["redteam-discovery"], "◆ DISCOVERY ON 40/40 left");
+  await run("rt-start");
+  assert.match(ui.notices.at(-1)!, /✓ 4\. Decide on discovery\n {5}◆ Discovery mode is ON: 40 of 40 request\(s\) left/);
 
   const outside = await tool("redteam_discover", { operation: "well_known", origin: "https://partner.example" });
   assert.match(outside.details.error, /partner\.example is not in scope/);
@@ -133,6 +137,10 @@ test("discovery needs operator arming, records findings as proposals, and accept
   assert.equal(names.details.budget.remaining, 0, "the wordlist is larger than what was left of the budget");
   assert.match(names.details.stopped, /budget of 40/);
   assert.match((await tool("redteam_discover", { operation: "status" })).details.discoveryMode, /off/, "an exhausted budget turns discovery off");
+  await run("rt-start");
+  assert.equal(ui.status["redteam-discovery"], "◇ discovery off");
+  assert.match(ui.widget[0], /◇ discovery off$/);
+  assert.match(ui.notices.at(-1)!, /✓ 4\. Decide on discovery\n {5}◇ Discovery mode is off \(3 run\(s\) so far\)/);
 
   await run("rt-endpoints");
   await run("rt-tasks");
@@ -165,9 +173,13 @@ test("passive sources need operator approval; discovery mode then covers them wi
   await run("rt-discover", "allow crt.sh");
   assert.deepEqual(config().passiveSources, ["crt.sh"]);
   ui.prompts.length = 0;
+  assert.equal(await bash(lookup), undefined);
+  assert.deepEqual(ui.prompts, [], "approving a source leaves discovery mode on");
+
+  await run("rt-discover", "off");
   ui.answer = false;
   assert.match((await bash(lookup))!.reason!, /denied by operator/);
-  assert.deepEqual(ui.prompts, ["Allow one passive lookup?"], "approving a source disarms discovery, so the lookup asks");
+  assert.deepEqual(ui.prompts, ["Allow one passive lookup?"], "with discovery off, each passive lookup asks");
 
   ui.answer = true;
   await run("rt-discover", "on 3");

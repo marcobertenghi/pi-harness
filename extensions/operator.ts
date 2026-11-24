@@ -33,7 +33,7 @@ export interface OperatorDeps {
   getAudit(ctx: Context): AuditLog;
   reviewScope(cwd: string): ReviewScope;
   inventory(cwd: string): { config: RedteamConfig; targets: string[]; sourceDetails: TargetSourceDetail[] };
-  /** Rewrites redteam.config.json, snapshots the new scope, disarms, and records the audit event; rolls back on failure. */
+  /** Rewrites redteam.config.json, snapshots the new scope, and records the audit event; rolls back on failure. Arming is unchanged. */
   changeScope(ctx: Context, change: (raw: { targets: string[]; excludeTargets?: string[] }) => void, event: Omit<AuditEvent, "sessionId" | "scopeHash">): void;
   auditContext(ctx: Context): Pick<AuditEvent, "sessionId" | "scopeHash">;
   log(ctx: Context, event: Omit<AuditEvent, "sessionId" | "scopeHash">): boolean;
@@ -52,7 +52,8 @@ export function registerOperator(pi: ExtensionAPI, deps: OperatorDeps) {
   function board(ctx: Context, showClosed: boolean): string {
     const scope = deps.reviewScope(ctx.cwd);
     const audit = deps.getAudit(ctx);
-    const page = (state: "waiting_on_operator" | "blocked" | "pending") => audit.coverage.view(scope, { state, limit: 4 }).entries;
+    // Items waiting on the operator are listed in full (up to 25); the rest are samples.
+    const page = (state: "waiting_on_operator" | "blocked" | "pending") => audit.coverage.view(scope, { state, limit: state === "waiting_on_operator" ? 25 : 4 }).entries;
     return boardText({
       snapshot: deps.snapshot(ctx),
       waiting: page("waiting_on_operator").map((entry) => ({ key: entry.key, missing: entry.review?.missingFact })),
@@ -118,6 +119,27 @@ export function registerOperator(pi: ExtensionAPI, deps: OperatorDeps) {
     },
   });
 
+  pi.registerTool({
+    name: "redteam_next",
+    label: "Recommended next steps",
+    description: "Tell the operator what to do next. Call this before ending a run with up to four next steps, best first: a short label, the exact instruction the operator would send you to carry it out, and one line on the expected gain. They replace the previous set and appear in the operator's /rt-steer menu. Pass an empty list when nothing is left to do. Suggestions only: they never run by themselves and never grant scope or authorization.",
+    parameters: Type.Object({
+      steps: Type.Array(Type.Object({
+        label: Type.String({ minLength: 1, maxLength: 70, description: "What the step is, in a few words" }),
+        instruction: Type.String({ minLength: 1, maxLength: 600, description: "The message the operator would send to have you do it" }),
+        why: Type.Optional(Type.String({ maxLength: 140, description: "Expected gain, e.g. 'closes 6 pending items'" })),
+      }), { maxItems: 4 }),
+    }),
+    async execute(_id, params, _signal, _update, ctx) {
+      const context = ctx as unknown as Context;
+      const scope = deps.reviewScope(ctx.cwd);
+      const saved = deps.getAudit(context).nextSteps.replace(scope.key, params.steps.map((step) => ({ ...step, instruction: bounded(step.instruction, 600) })));
+      deps.log(context, { eventType: "next_steps_proposed", actor: "agent", status: "completed", summary: saved.map((step) => step.label).join(" | ") || "none" });
+      const result = { recorded: saved.length, shownIn: "/rt-steer" };
+      return { content: [{ type: "text", text: JSON.stringify(result) }], details: result };
+    },
+  });
+
   deps.registerCommand("rt-onboard", {
     description: "Add one exact host or IP to the authorized scope after confirmation: /rt-onboard HOST",
     handler: guarded(async (args, ctx) => {
@@ -136,7 +158,7 @@ export function registerOperator(pi: ExtensionAPI, deps: OperatorDeps) {
       }
       const confirmed = await ctx.ui.confirm(
         `Add ${host} to the authorized scope?`,
-        `Confirm that current written authorization explicitly covers ${host}.\n\nThis will:\n  • append only this exact host to "targets" in redteam.config.json\n  • record the change in the audit log\n  • disarm active checks\n\nIt does not add related hosts, wildcards, routes, or credentials.`,
+        `Confirm that current written authorization explicitly covers ${host}.\n\nThis will:\n  • append only this exact host to "targets" in redteam.config.json\n  • record the change in the audit log\n\nActive checks stay as you set them. It does not add related hosts, wildcards, routes, or credentials.`,
       );
       if (!confirmed) return ctx.ui.notify(`${host} was not added. Scope unchanged.`, "info");
       deps.changeScope(ctx, (raw) => { raw.targets = [...new Set([...raw.targets, host])]; }, {
@@ -147,7 +169,7 @@ export function registerOperator(pi: ExtensionAPI, deps: OperatorDeps) {
       const audit = deps.getAudit(ctx);
       audit.proposals.record(scope.key, host, "Operator /rt-onboard", "Added directly by the operator");
       audit.recordProposalDisposition(scope.key, host, "onboarded", deps.auditContext(ctx));
-      ctx.ui.notify(`★ ${host} onboarded and now in scope.\nActive checks are disarmed. Next: /rt-targets to review scope, /rt-arm when you are ready, /rt-offboard ${host} to undo.`, "info");
+      ctx.ui.notify(`★ ${host} onboarded and now in scope.\nNext: /rt-targets to review scope, /rt-offboard ${host} to undo.`, "info");
     }),
   });
 
@@ -180,7 +202,6 @@ export function registerOperator(pi: ExtensionAPI, deps: OperatorDeps) {
         ...(explicit ? [`  • remove ${host} from "targets" in redteam.config.json`] : []),
         ...(exclude ? [`  • add ${host} to "excludeTargets", because it is still covered by ${inventoryFiles.length ? `inventory file ${inventoryFiles.join(", ")}` : "a broader range or wildcard rule"} (inventory files are not edited)`] : []),
         "  • record the change in the audit log",
-        "  • disarm active checks",
       ];
       const confirmed = await ctx.ui.confirm(
         `Take ${host} out of scope?`,
@@ -196,7 +217,7 @@ export function registerOperator(pi: ExtensionAPI, deps: OperatorDeps) {
       });
       const after = deps.reviewScope(ctx.cwd);
       if (scopeDecision(host, after.targets, after.exclusions) === "included") throw new Error(`${host} is still in scope after the update; check redteam.config.json and /rt-targets.`);
-      ctx.ui.notify(`⛔ ${host} offboarded${exclude ? " (now excluded)" : ""}.\nActive checks are disarmed. Next: /rt-targets to review scope, /rt-arm when you are ready.`, "info");
+      ctx.ui.notify(`⛔ ${host} offboarded${exclude ? " (now excluded)" : ""}.\nNext: /rt-targets to review scope.`, "info");
     }),
   });
 
@@ -205,7 +226,10 @@ export function registerOperator(pi: ExtensionAPI, deps: OperatorDeps) {
     handler: guarded(async (_args, ctx) => {
       const prompts = steeringPrompts(deps.snapshot(ctx));
       if (!ctx.hasUI) return ctx.ui.notify(["Steering instructions:", ...prompts.map((item) => `- ${item.label}: ${item.prompt}`)].join("\n"), "info");
-      const labels = prompts.map((item, index) => `${index === 0 ? "▸ " : "  "}${item.label}`);
+      const firstBuiltIn = prompts.findIndex((item) => !item.fromAgent);
+      const labels = prompts.map((item, index) => item.fromAgent
+        ? `★ Agent recommends: ${item.label}${item.why ? ` — ${item.why}` : ""}`
+        : `${index === firstBuiltIn ? "▸ " : "  "}${item.label}`);
       const selected = await ctx.ui.select("Steer the agent — the instruction goes to the editor for you to review", labels);
       if (!selected) return;
       ctx.ui.setEditorText(prompts[labels.indexOf(selected)].prompt);
@@ -218,7 +242,7 @@ export function registerOperator(pi: ExtensionAPI, deps: OperatorDeps) {
     handler: guarded(async (_args, ctx) => {
       let facts = preflight(ctx.cwd);
       if (ctx.hasUI && (facts.configProblem || !facts.configExists)) {
-        ctx.ui.notify(startText(facts).text, "info");
+        ctx.ui.notify(startText(facts, deps.snapshot(ctx)).text, "info");
         const run = await ctx.ui.confirm("Run the setup wizard now?",
           `${facts.configExists ? `The configuration needs attention: ${facts.configProblem}.` : "This folder has no engagement configuration yet."}\n\nThe wizard asks for the authorization reference and expiry date, then offers defaults for everything else. It never arms active checks and you can cancel with Escape.`);
         if (!run) return ctx.ui.notify("Setup not started. Run /rt-start or /rt-setup when you are ready.", "info");
@@ -233,7 +257,7 @@ export function registerOperator(pi: ExtensionAPI, deps: OperatorDeps) {
         if (file) ctx.ui.notify(`Created ${file}. Open it in your editor and add the authorized targets.`, "info");
         facts = preflight(ctx.cwd);
       }
-      const result = startText(facts);
+      const result = startText(facts, deps.snapshot(ctx));
       ctx.ui.notify(result.text, result.ready ? "info" : "warning");
     }),
   });
@@ -265,12 +289,17 @@ export function registerOperator(pi: ExtensionAPI, deps: OperatorDeps) {
           if (title?.trim()) await deps.run("rt-tasks", `add ${title}`, ctx);
         }],
         ["Track · progress reconciled with scans", go("rt-progress")],
+        ["Results · findings register", go("rt-findings")],
+        ["Results · captured credentials", go("rt-creds")],
+        ["Results · write the draft report", go("rt-report")],
+        ["Results · write a handover note", go("rt-handover")],
         ["Run · steer the agent", go("rt-steer")],
         [snapshot.armed ? "Run · disarm active checks" : "Run · arm active checks", go(snapshot.armed ? "rt-disarm" : "rt-arm")],
         ["Audit · recent events", go("rt-log")],
         ["Audit · verify the log", go("rt-log", "verify")],
         ["Setup · guided start and folder check", go("rt-start")],
         ["Setup · engagement wizard", go("rt-setup")],
+        ["Setup · check installed tools", go("rt-tools")],
         ["Help · command guide", go("rt-help")],
       ];
       const selected = await ctx.ui.select("Red-team menu", entries.map(([label]) => label));
